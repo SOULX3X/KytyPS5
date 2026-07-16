@@ -84,30 +84,12 @@ static void PublishImmediateFence(T* dst, T value) {
 	std::memcpy(dst, &value, sizeof(value));
 }
 
-static void SubmitDisplayBufferFlip(const uint64_t* args) {
-	if (g_render_ctx == nullptr || args == nullptr) {
-		EXIT("GPU flip submission has invalid state, render_ctx=%p args=%p\n",
-		     static_cast<const void*>(g_render_ctx), static_cast<const void*>(args));
-	}
-	const auto handle    = static_cast<int>(args[0]);
-	const auto index     = static_cast<int>(args[1]);
-	const auto flip_mode = static_cast<int>(args[2]);
-	const auto flip_arg  = static_cast<int64_t>(args[3]);
-	const auto result =
-	    Presentation::DisplayBufferSubmitFlipFromGpu(handle, index, flip_mode, flip_arg);
-	if (result != 0) {
-		EXIT("GPU flip submission failed, result=%d handle=%d index=%d mode=%d arg=%" PRId64 "\n",
-		     result, handle, index, flip_mode, flip_arg);
-	}
-}
-
 static bool CompleteDisplayBufferFlip(const uint64_t* args) {
 	if (g_render_ctx == nullptr || args == nullptr) {
 		EXIT("GPU flip completion has invalid state, render_ctx=%p args=%p\n",
 		     static_cast<const void*>(g_render_ctx), static_cast<const void*>(args));
 	}
-	Presentation::DisplayBufferCompleteFlipFromGpu(static_cast<int>(args[0]),
-	                                               static_cast<int>(args[1]));
+	Presentation::DisplayBufferCompleteFlipFromGpu(args[0]);
 	return true;
 }
 
@@ -348,9 +330,28 @@ void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t submit_id, CommandBu
 	    args);
 }
 
+uint64_t GraphicsRenderPrepareDisplayBufferFlip(CommandBuffer* buffer, int handle, int index,
+                                                int flip_mode, int64_t flip_arg) {
+	for (;;) {
+		uint64_t   request_id = 0;
+		const auto result     = Presentation::DisplayBufferSubmitFlipFromGpu(
+		    buffer, handle, index, flip_mode, flip_arg, &request_id);
+		if (result == OK) {
+			EXIT_IF(request_id == 0);
+			return request_id;
+		}
+		if (result != VideoOut::VIDEO_OUT_ERROR_FLIP_QUEUE_FULL) {
+			EXIT("GPU flip submission failed, result=%d handle=%d index=%d mode=%d arg=%" PRId64
+			     "\n",
+			     result, handle, index, flip_mode, flip_arg);
+		}
+		Presentation::DisplayBufferWaitForFlipQueueSlot();
+	}
+}
+
 void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(
     uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value, int handle,
-    int index, int flip_mode, int64_t flip_arg) {
+    int index, int flip_mode, int64_t flip_arg, uint64_t request_id) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -361,11 +362,7 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(
 	                     static_cast<uint32_t>(flip_mode), value, static_cast<uint64_t>(flip_arg));
 	PublishImmediateFence(dst_gpu_addr, value);
 
-	uint64_t args[LABEL_ARGS_MAX] = {static_cast<uint64_t>(handle), static_cast<uint64_t>(index),
-	                                 static_cast<uint64_t>(flip_mode),
-	                                 static_cast<uint64_t>(flip_arg)};
-
-	SubmitDisplayBufferFlip(args);
+	const uint64_t args[LABEL_ARGS_MAX] = {request_id};
 	SubmitLabel32(
 	    buffer, nullptr, 0, CompleteDisplayBufferFlip,
 	    [](const uint64_t* /*args*/) {
@@ -378,7 +375,8 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(
 
 void GraphicsRenderWriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer* buffer,
                                               uint32_t* dst_gpu_addr, uint32_t value, int handle,
-                                              int index, int flip_mode, int64_t flip_arg) {
+                                              int index, int flip_mode, int64_t flip_arg,
+                                              uint64_t request_id) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -389,16 +387,13 @@ void GraphicsRenderWriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer*
 	                     static_cast<uint32_t>(flip_mode), value, static_cast<uint64_t>(flip_arg));
 	PublishImmediateFence(dst_gpu_addr, value);
 
-	uint64_t args[LABEL_ARGS_MAX] = {static_cast<uint64_t>(handle), static_cast<uint64_t>(index),
-	                                 static_cast<uint64_t>(flip_mode),
-	                                 static_cast<uint64_t>(flip_arg)};
-
-	SubmitDisplayBufferFlip(args);
+	const uint64_t args[LABEL_ARGS_MAX] = {request_id};
 	SubmitLabel32(buffer, nullptr, 0, CompleteDisplayBufferFlip, nullptr, args);
 }
 
 void GraphicsRenderWriteAtEndOfPipeOnlyFlip(uint64_t submit_id, CommandBuffer* buffer, int handle,
-                                            int index, int flip_mode, int64_t flip_arg) {
+                                            int index, int flip_mode, int64_t flip_arg,
+                                            uint64_t request_id) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(buffer == nullptr);
 	EXIT_IF(buffer->IsInvalid());
@@ -407,11 +402,7 @@ void GraphicsRenderWriteAtEndOfPipeOnlyFlip(uint64_t submit_id, CommandBuffer* b
 	                     static_cast<uint32_t>(handle), static_cast<uint32_t>(index),
 	                     static_cast<uint32_t>(flip_mode), 0, static_cast<uint64_t>(flip_arg));
 
-	uint64_t args[LABEL_ARGS_MAX] = {static_cast<uint64_t>(handle), static_cast<uint64_t>(index),
-	                                 static_cast<uint64_t>(flip_mode),
-	                                 static_cast<uint64_t>(flip_arg)};
-
-	SubmitDisplayBufferFlip(args);
+	const uint64_t args[LABEL_ARGS_MAX] = {request_id};
 	SubmitLabel32(buffer, nullptr, 0, CompleteDisplayBufferFlip, nullptr, args);
 }
 

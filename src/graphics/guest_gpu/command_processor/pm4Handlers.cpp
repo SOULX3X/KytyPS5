@@ -2494,7 +2494,6 @@ KYTY_CP_OP_PARSER(CpOpFlip) {
 
 	cp->SetFlip(f);
 	cp->Flip();
-	cp->BufferFlush();
 	return 5;
 }
 

@@ -10,6 +10,7 @@
 #include "common/threads.h"
 #include "common/timer.h"
 #include "graphics/guest_gpu/gpu_defs.h"
+#include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -21,6 +22,7 @@
 #include "libs/libs.h"
 
 #include <algorithm>
+#include <limits>
 #include <list>
 #include <vector>
 
@@ -45,6 +47,7 @@ constexpr int      VIDEO_OUT_FLIP_MODE_VSYNC_MULTI                      = 4;
 constexpr int      VIDEO_OUT_BUFFER_INDEX_BLACK                         = -2;
 constexpr int      VIDEO_OUT_BUFFER_INDEX_BLANK                         = -1;
 constexpr int      VIDEO_OUT_BUFFER_NUM_MAX                             = 16;
+constexpr size_t   VIDEO_OUT_FLIP_QUEUE_CAPACITY                        = 16;
 constexpr int      VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX                   = 4;
 constexpr uint64_t VIDEO_OUT_OUTPUT_MODE_DEFAULT                        = 0x0000000000000001ULL;
 constexpr uint64_t VIDEO_OUT_OUTPUT_MODE_119_88HZ                       = 0x000000000000000FULL;
@@ -160,28 +163,39 @@ public:
 	virtual ~FlipQueue() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(FlipQueue);
 
-	bool Submit(VideoOutConfig* cfg, int index, int64_t flip_arg, bool gpu_eop);
+	bool Reserve(VideoOutConfig* cfg, int index, int64_t flip_arg, bool gpu_eop,
+	             uint64_t* request_id);
+	void Prepare(uint64_t request_id, Graphics::CommandBuffer* buffer);
+	uint64_t PrepareNextCpu(Graphics::CommandBuffer* buffer);
+	void Complete(uint64_t request_id);
+	void WaitForSubmitSlot();
 	bool Flip(uint32_t micros);
 	bool HasPending(VideoOutConfig* cfg, int start_index, int count);
 	void GetFlipStatus(VideoOutConfig* cfg, VideoOutFlipStatus* out);
-	void AllowEopPresent(VideoOutConfig* cfg, int index);
 	void Wait(VideoOutConfig* cfg, int index);
 
 private:
+	enum class RequestState { Reserved, Recording, Ready, Presenting };
+
 	struct Request {
+		uint64_t        id;
 		VideoOutConfig* cfg;
 		int             index;
 		int64_t         flip_arg;
 		uint64_t        submit_ptc;
 		bool            gpu_eop;
-		bool            prepared;
+		RequestState    state;
+		Graphics::PreparedFrame* frame;
 	};
 
 	Common::Mutex      m_mutex;
 	Common::CondVar    m_submit_cond_var;
+	Common::CondVar    m_submit_slot_cond_var;
 	Common::CondVar    m_done_cond_var;
 	std::list<Request> m_requests;
+	std::list<Request> m_cpu_requests;
 	bool               m_processing = false;
+	uint64_t           m_next_request_id = 1;
 };
 
 class VideoOutContext {
@@ -558,52 +572,145 @@ Presentation::DisplayBufferImage VideoOutContext::FindImage(const void* buffer,
 	return ret;
 }
 
-bool FlipQueue::Submit(VideoOutConfig* cfg, int index, int64_t flip_arg, bool gpu_eop) {
+bool FlipQueue::Reserve(VideoOutConfig* cfg, int index, int64_t flip_arg, bool gpu_eop,
+                        uint64_t* request_id) {
+	EXIT_IF(cfg == nullptr || request_id == nullptr);
 	Common::LockGuard lock(m_mutex);
 
-	if (m_requests.size() >= 16) {
+	if (m_requests.size() + m_cpu_requests.size() >= VIDEO_OUT_FLIP_QUEUE_CAPACITY) {
 		return false;
 	}
+	auto& pending = gpu_eop ? m_requests : m_cpu_requests;
 
 	Request r {};
+	r.id         = m_next_request_id++;
 	r.cfg        = cfg;
 	r.index      = index;
 	r.flip_arg   = flip_arg;
 	r.submit_ptc = LibKernel::KernelGetProcessTimeCounter();
 	r.gpu_eop    = gpu_eop;
-	r.prepared   = !gpu_eop;
+	r.state      = RequestState::Reserved;
 
-	m_requests.push_back(r);
+	pending.push_back(r);
+	*request_id = r.id;
 
-	cfg->flip_status.flipPendingNum           = static_cast<int>(m_requests.size());
+	cfg->flip_status.flipPendingNum = static_cast<int>(m_requests.size() + m_cpu_requests.size());
 	cfg->flip_status.submitProcessTimeCounter = r.submit_ptc;
 	if (gpu_eop) {
 		cfg->flip_status.gcQueueNum++;
 	}
 
-	m_submit_cond_var.Signal();
-
 	return true;
 }
 
-void FlipQueue::AllowEopPresent(VideoOutConfig* cfg, int index) {
-	Common::LockGuard lock(m_mutex);
-	auto request = std::find_if(m_requests.begin(), m_requests.end(), [cfg, index](const auto& r) {
-		return r.cfg == cfg && r.index == index && r.gpu_eop && !r.prepared;
-	});
-	if (request == m_requests.end()) {
-		EXIT("completed GPU flip has no queued request\n");
+void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer* buffer) {
+	EXIT_IF(buffer == nullptr);
+
+	VideoOutConfig* cfg   = nullptr;
+	int             index = 0;
+	{
+		Common::LockGuard lock(m_mutex);
+		auto request = std::find_if(m_requests.begin(), m_requests.end(),
+		                            [request_id](const auto& r) { return r.id == request_id; });
+		if (request == m_requests.end()) {
+			auto pending = std::find_if(m_cpu_requests.begin(), m_cpu_requests.end(),
+			                            [request_id](const auto& r) { return r.id == request_id; });
+			if (pending == m_cpu_requests.end()) {
+				EXIT("cannot prepare video-out request id=%" PRIu64 "\n", request_id);
+			}
+			request = m_requests.insert(m_requests.end(), *pending);
+			m_cpu_requests.erase(pending);
+		}
+		if (request->state != RequestState::Reserved) {
+			EXIT("cannot prepare video-out request id=%" PRIu64 "\n", request_id);
+		}
+		request->state = RequestState::Recording;
+		cfg            = request->cfg;
+		index          = request->index;
 	}
-	request->prepared = true;
+
+	const bool                     special = IsSpecialBufferIndex(index);
+	Graphics::VideoOutVulkanImage* source  = nullptr;
+	uint32_t                       width   = 0;
+	uint32_t                       height  = 0;
+	{
+		Common::LockGuard lock(cfg->mutex);
+		if (cfg->closing) {
+			EXIT("cannot prepare flip for a closing video-out, id=%" PRIu64 "\n", request_id);
+		}
+		if (special) {
+			width  = cfg->width;
+			height = cfg->height;
+		} else {
+			if (cfg->unregistering[index]) {
+				EXIT("cannot prepare flip from an unavailable surface, id=%" PRIu64 " index=%d\n",
+				     request_id, index);
+			}
+			source = cfg->buffers[index].buffer_vulkan;
+			if (source == nullptr) {
+				EXIT("cannot prepare flip without a native surface, id=%" PRIu64 " index=%d\n",
+				     request_id, index);
+			}
+		}
+	}
+	auto* frame = special ? Graphics::WindowPrepareBlankFrame(buffer, width, height,
+	                                                          index == VIDEO_OUT_BUFFER_INDEX_BLACK)
+	                      : Graphics::WindowPrepareFrame(buffer, source);
+
+	Common::LockGuard lock(m_mutex);
+	auto request = std::find_if(m_requests.begin(), m_requests.end(),
+	                            [request_id](const auto& r) { return r.id == request_id; });
+	if (request == m_requests.end() || request->state != RequestState::Recording ||
+	    request->frame != nullptr) {
+		EXIT("video-out request changed while recording, id=%" PRIu64 "\n", request_id);
+	}
+	request->frame = frame;
+}
+
+uint64_t FlipQueue::PrepareNextCpu(Graphics::CommandBuffer* buffer) {
+	uint64_t request_id = 0;
+	{
+		Common::LockGuard lock(m_mutex);
+		if (m_cpu_requests.empty()) {
+			EXIT("CPU flip preparation has no accepted request\n");
+		}
+		request_id = m_cpu_requests.front().id;
+	}
+	Prepare(request_id, buffer);
+	return request_id;
+}
+
+void FlipQueue::Complete(uint64_t request_id) {
+	Common::LockGuard lock(m_mutex);
+	auto request = std::find_if(m_requests.begin(), m_requests.end(),
+	                            [request_id](const auto& r) { return r.id == request_id; });
+	if (request == m_requests.end() || request->state != RequestState::Recording ||
+	    request->frame == nullptr) {
+		EXIT("completed GPU flip has no prepared recording, id=%" PRIu64 "\n", request_id);
+	}
+	request->state = RequestState::Ready;
 	m_submit_cond_var.Signal();
+}
+
+void FlipQueue::WaitForSubmitSlot() {
+	Common::LockGuard lock(m_mutex);
+	while (m_requests.size() + m_cpu_requests.size() >= VIDEO_OUT_FLIP_QUEUE_CAPACITY) {
+		if (m_requests.empty()) {
+			EXIT("video-out queue is saturated by CPU flips queued behind the current EOP\n");
+		}
+		m_submit_slot_cond_var.Wait(&m_mutex);
+	}
 }
 
 void FlipQueue::Wait(VideoOutConfig* cfg, int index) {
 	Common::LockGuard lock(m_mutex);
 
-	while (std::find_if(m_requests.begin(), m_requests.end(), [cfg, index](const auto& r) {
-		       return r.cfg == cfg && r.index == index;
-	       }) != m_requests.end()) {
+	auto has_request = [this, cfg, index] {
+		auto matches = [cfg, index](const auto& r) { return r.cfg == cfg && r.index == index; };
+		return std::any_of(m_requests.begin(), m_requests.end(), matches) ||
+		       std::any_of(m_cpu_requests.begin(), m_cpu_requests.end(), matches);
+	};
+	while (has_request()) {
 		m_done_cond_var.Wait(&m_mutex);
 	}
 }
@@ -613,10 +720,12 @@ bool FlipQueue::HasPending(VideoOutConfig* cfg, int start_index, int count) {
 		EXIT("invalid video-out pending-flip query range\n");
 	}
 	Common::LockGuard lock(m_mutex);
-	return std::any_of(m_requests.begin(), m_requests.end(), [&](const auto& request) {
+	auto              matches = [&](const auto& request) {
 		return request.cfg == cfg && request.index >= start_index &&
 		       request.index < start_index + count;
-	});
+	};
+	return std::any_of(m_requests.begin(), m_requests.end(), matches) ||
+	       std::any_of(m_cpu_requests.begin(), m_cpu_requests.end(), matches);
 }
 
 bool FlipQueue::Flip(uint32_t micros) {
@@ -634,7 +743,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 	if (m_processing) {
 		EXIT("video-out flip queue processing is already active\n");
 	}
-	if (m_requests.front().gpu_eop && !m_requests.front().prepared) {
+	if (m_requests.front().state != RequestState::Ready) {
 		m_mutex.Unlock();
 		return false;
 	}
@@ -647,23 +756,19 @@ bool FlipQueue::Flip(uint32_t micros) {
 		return false;
 	}
 
-	Graphics::VideoOutVulkanImage* buffer = nullptr;
-	r.cfg->mutex.Lock();
-	if (!IsSpecialBufferIndex(r.index)) {
-		buffer = r.cfg->buffers[r.index].buffer_vulkan;
-		if (buffer == nullptr) {
-			EXIT("queued video-out flip has no native surface\n");
-		}
+	m_mutex.Lock();
+	if (m_requests.empty() || m_requests.front().id != r.id ||
+	    m_requests.front().state != RequestState::Ready || !m_processing) {
+		EXIT("video-out request changed before presentation, id=%" PRIu64 "\n", r.id);
 	}
-	r.cfg->mutex.Unlock();
-	if (buffer != nullptr) {
-		Graphics::g_render_ctx->GetTextureCache()->RefreshVideoOut(buffer);
-		Graphics::WindowDrawBuffer(buffer);
-	}
+	m_requests.front().state = RequestState::Presenting;
+	m_mutex.Unlock();
+
+	Graphics::WindowPresentFrame(r.frame);
 
 	m_mutex.Lock();
-	if (m_requests.empty() || m_requests.front().cfg != r.cfg ||
-	    m_requests.front().index != r.index || m_requests.front().submit_ptc != r.submit_ptc) {
+	if (m_requests.empty() || m_requests.front().id != r.id ||
+	    m_requests.front().state != RequestState::Presenting) {
 		EXIT("video-out flip queue changed while processing its front request\n");
 	}
 	m_requests.pop_front();
@@ -674,13 +779,14 @@ bool FlipQueue::Flip(uint32_t micros) {
 	r.cfg->flip_status.submitProcessTimeCounter = r.submit_ptc;
 	r.cfg->flip_status.flipArg                  = r.flip_arg;
 	r.cfg->flip_status.currentBuffer            = r.index;
-	r.cfg->flip_status.flipPendingNum           = static_cast<int>(m_requests.size());
+	r.cfg->flip_status.flipPendingNum = static_cast<int>(m_requests.size() + m_cpu_requests.size());
 	if (r.gpu_eop && r.cfg->flip_status.gcQueueNum > 0) {
 		r.cfg->flip_status.gcQueueNum--;
 	}
 
 	m_processing = false;
-	m_done_cond_var.Signal();
+	m_done_cond_var.SignalAll();
+	m_submit_slot_cond_var.Signal();
 	m_mutex.Unlock();
 
 	r.cfg->mutex.Lock();
@@ -1448,17 +1554,20 @@ KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64
 	if (!IsValidBufferIndex(index)) {
 		return VIDEO_OUT_ERROR_INVALID_INDEX;
 	}
-	Common::LockGuard lock(ctx->mutex);
-	if (ctx->closing || (!IsSpecialBufferIndex(index) && ctx->unregistering[index])) {
-		return VIDEO_OUT_ERROR_INVALID_INDEX;
+	uint64_t request_id = 0;
+	{
+		Common::LockGuard lock(ctx->mutex);
+		const bool        special = IsSpecialBufferIndex(index);
+		if (ctx->closing || (!special && (ctx->unregistering[index] ||
+		                                  ctx->buffers[index].buffer_vulkan == nullptr))) {
+			return VIDEO_OUT_ERROR_INVALID_INDEX;
+		}
+		if (!g_video_out_context->GetFlipQueue().Reserve(ctx, index, flip_arg, false,
+		                                                 &request_id)) {
+			return VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
+		}
 	}
-	if (!IsSpecialBufferIndex(index) && ctx->buffers[index].buffer_vulkan == nullptr) {
-		return VIDEO_OUT_ERROR_INVALID_INDEX;
-	}
-
-	if (!g_video_out_context->GetFlipQueue().Submit(ctx, index, flip_arg, false)) {
-		return VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
-	}
+	Graphics::GraphicsRunSubmitFlipPreparation();
 
 	return OK;
 }
@@ -1467,8 +1576,10 @@ KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64
 
 namespace Libs::Presentation {
 
-int DisplayBufferSubmitFlipFromGpu(int handle, int index, int flip_mode, int64_t flip_arg) {
-	EXIT_IF(VideoOut::g_video_out_context == nullptr || Graphics::g_render_ctx == nullptr);
+int DisplayBufferSubmitFlipFromGpu(Graphics::CommandBuffer* buffer, int handle, int index,
+                                   int flip_mode, int64_t flip_arg, uint64_t* request_id) {
+	EXIT_IF(VideoOut::g_video_out_context == nullptr || Graphics::g_render_ctx == nullptr ||
+	        buffer == nullptr || request_id == nullptr);
 
 	auto* ctx = VideoOut::g_video_out_context->Get(handle);
 	if (ctx == nullptr) {
@@ -1483,41 +1594,36 @@ int DisplayBufferSubmitFlipFromGpu(int handle, int index, int flip_mode, int64_t
 	if (!VideoOut::IsValidBufferIndex(index)) {
 		return VideoOut::VIDEO_OUT_ERROR_INVALID_INDEX;
 	}
-	Common::LockGuard lock(ctx->mutex);
-	if (ctx->closing || (!VideoOut::IsSpecialBufferIndex(index) && ctx->unregistering[index])) {
-		return VideoOut::VIDEO_OUT_ERROR_INVALID_INDEX;
+	{
+		Common::LockGuard lock(ctx->mutex);
+		const bool        special = VideoOut::IsSpecialBufferIndex(index);
+		if (ctx->closing || (!special && (ctx->unregistering[index] ||
+		                                  ctx->buffers[index].buffer_vulkan == nullptr))) {
+			return VideoOut::VIDEO_OUT_ERROR_INVALID_INDEX;
+		}
+		if (!VideoOut::g_video_out_context->GetFlipQueue().Reserve(ctx, index, flip_arg, true,
+		                                                           request_id)) {
+			return VideoOut::VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
+		}
 	}
-	if (!VideoOut::IsSpecialBufferIndex(index) && ctx->buffers[index].buffer_vulkan == nullptr) {
-		return VideoOut::VIDEO_OUT_ERROR_INVALID_INDEX;
-	}
-	if (!VideoOut::g_video_out_context->GetFlipQueue().Submit(ctx, index, flip_arg, true)) {
-		return VideoOut::VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
-	}
+	VideoOut::g_video_out_context->GetFlipQueue().Prepare(*request_id, buffer);
 
 	return OK;
 }
 
-void DisplayBufferCompleteFlipFromGpu(int handle, int index) {
+uint64_t DisplayBufferPrepareNextFlipOnGpu(Graphics::CommandBuffer* buffer) {
 	EXIT_IF(VideoOut::g_video_out_context == nullptr || Graphics::g_render_ctx == nullptr);
+	return VideoOut::g_video_out_context->GetFlipQueue().PrepareNextCpu(buffer);
+}
 
-	auto* ctx = VideoOut::g_video_out_context->Get(handle);
-	if (ctx == nullptr || !VideoOut::IsValidBufferIndex(index)) {
-		EXIT("GPU flip completed with invalid handle or index, handle=%d index=%d\n", handle,
-		     index);
-	}
-	Common::LockGuard lock(ctx->mutex);
-	if (ctx->closing || (!VideoOut::IsSpecialBufferIndex(index) && ctx->unregistering[index])) {
-		EXIT("GPU flip completed for an unavailable surface, handle=%d index=%d\n", handle, index);
-	}
-	if (!VideoOut::IsSpecialBufferIndex(index)) {
-		auto* image = ctx->buffers[index].buffer_vulkan;
-		if (image == nullptr) {
-			EXIT("GPU flip completed without a native surface, handle=%d index=%d\n", handle,
-			     index);
-		}
-		Graphics::g_render_ctx->GetTextureCache()->RefreshVideoOut(image);
-	}
-	VideoOut::g_video_out_context->GetFlipQueue().AllowEopPresent(ctx, index);
+void DisplayBufferCompleteFlipFromGpu(uint64_t request_id) {
+	EXIT_IF(VideoOut::g_video_out_context == nullptr || Graphics::g_render_ctx == nullptr);
+	VideoOut::g_video_out_context->GetFlipQueue().Complete(request_id);
+}
+
+void DisplayBufferWaitForFlipQueueSlot() {
+	EXIT_IF(VideoOut::g_video_out_context == nullptr || Graphics::g_render_ctx == nullptr);
+	VideoOut::g_video_out_context->GetFlipQueue().WaitForSubmitSlot();
 }
 
 } // namespace Libs::Presentation

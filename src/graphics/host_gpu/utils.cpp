@@ -863,17 +863,21 @@ void UtilCopyImageWithBuffer(CommandBuffer* buffer, GraphicContext* ctx, VulkanI
 	               final_layout);
 }
 
-void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain) {
+void UtilBlitPreparedImage(CommandBuffer* buffer, VulkanImage* src_image,
+                           VulkanSwapchain* dst_swapchain) {
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	if (src_image->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+		EXIT("invalid prepared presentation image, image=%p vk_image=%p layout=%d\n",
+		     static_cast<const void*>(src_image),
+		     src_image != nullptr ? static_cast<void*>(src_image->image) : nullptr,
+		     src_image != nullptr ? static_cast<int>(src_image->layout) : -1);
+	}
 
 	VulkanImage swapchain_image(VulkanImageType::Unknown);
 
 	swapchain_image.image  = dst_swapchain->swapchain_images[dst_swapchain->current_index];
 	swapchain_image.layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-	auto src_layout = src_image->layout;
-	SetImageLayout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_layout,
-	               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	SetImageLayout(vk_buffer, &swapchain_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT,
 	               VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
@@ -902,9 +906,18 @@ void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchai
 	vkCmdBlitImage(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 	               swapchain_image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region,
 	               VK_FILTER_LINEAR);
+}
 
-	SetImageLayout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT,
-	               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+void UtilClearColorImage(CommandBuffer* buffer, VulkanImage* image,
+                         const VkClearColorValue& color) {
+	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	SetImageLayout(vk_buffer, image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, image->layout,
+	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	const VkImageSubresourceRange range {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+	vkCmdClearColorImage(vk_buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1,
+	                     &range);
+	SetImageLayout(vk_buffer, image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT,
+	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 }
 
 void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffer) {

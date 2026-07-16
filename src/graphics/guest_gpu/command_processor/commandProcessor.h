@@ -162,6 +162,7 @@ public:
 	void Flip(void* dst_gpu_addr, uint32_t value);
 	void FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action, void* dst_gpu_addr,
 	                       uint32_t value);
+	void PrepareCpuFlip();
 	void SynchronizeGpu();
 	void SynchronizeGpuRange(uint64_t vaddr, uint64_t size);
 	void MemoryBarrier();

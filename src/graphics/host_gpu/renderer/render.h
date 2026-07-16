@@ -76,6 +76,7 @@ public:
 	void BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorInfo* colors,
 	                     uint32_t color_count, RenderDepthInfo* depth) const;
 	void EndRenderPass() const;
+	void WaitForFenceOnly();
 	void WaitForFence();
 	void WaitForFenceAndReset();
 	void DeleteAfterFence(VulkanBuffer* buffer);
@@ -96,6 +97,7 @@ private:
 	uint32_t                          m_index           = static_cast<uint32_t>(-1);
 	int                               m_queue           = -1;
 	bool                              m_execute         = false;
+	bool                              m_fence_waited    = false;
 	uint64_t                          m_submit_seq      = 0;
 	uint32_t                          m_debug_op        = 0;
 	uint64_t                          m_debug_submit_id = 0;
@@ -150,14 +152,18 @@ void GraphicsRenderWriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer,
 void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer* buffer,
                                          uint32_t* dst_gpu_addr, uint32_t dw_offset,
                                          uint32_t dw_num);
+uint64_t GraphicsRenderPrepareDisplayBufferFlip(CommandBuffer* buffer, int handle, int index,
+                                                int flip_mode, int64_t flip_arg);
 void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(
     uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value, int handle,
-    int index, int flip_mode, int64_t flip_arg);
+    int index, int flip_mode, int64_t flip_arg, uint64_t request_id);
 void GraphicsRenderWriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer* buffer,
                                               uint32_t* dst_gpu_addr, uint32_t value, int handle,
-                                              int index, int flip_mode, int64_t flip_arg);
+                                              int index, int flip_mode, int64_t flip_arg,
+                                              uint64_t request_id);
 void GraphicsRenderWriteAtEndOfPipeOnlyFlip(uint64_t submit_id, CommandBuffer* buffer, int handle,
-                                            int index, int flip_mode, int64_t flip_arg);
+                                            int index, int flip_mode, int64_t flip_arg,
+                                            uint64_t request_id);
 void GraphicsRenderWriteAtEndOfPipeWithWriteBack64(uint64_t submit_id, CommandBuffer* buffer,
                                                    uint64_t* dst_gpu_addr, uint64_t value);
 void GraphicsRenderWriteAtEndOfPipeWithWriteBack32(uint64_t submit_id, CommandBuffer* buffer,

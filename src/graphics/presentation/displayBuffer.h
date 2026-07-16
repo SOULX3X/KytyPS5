@@ -4,6 +4,7 @@
 #include "common/common.h"
 
 namespace Libs::Graphics {
+class CommandBuffer;
 struct VideoOutVulkanImage;
 } // namespace Libs::Graphics
 
@@ -17,8 +18,11 @@ struct DisplayBufferImage {
 };
 
 DisplayBufferImage DisplayBufferFind(uint64_t addr, bool render_target = false);
-int  DisplayBufferSubmitFlipFromGpu(int handle, int index, int flip_mode, int64_t flip_arg);
-void DisplayBufferCompleteFlipFromGpu(int handle, int index);
+int  DisplayBufferSubmitFlipFromGpu(Graphics::CommandBuffer* buffer, int handle, int index,
+                                    int flip_mode, int64_t flip_arg, uint64_t* request_id);
+uint64_t DisplayBufferPrepareNextFlipOnGpu(Graphics::CommandBuffer* buffer);
+void DisplayBufferCompleteFlipFromGpu(uint64_t request_id);
+void DisplayBufferWaitForFlipQueueSlot();
 
 } // namespace Libs::Presentation
 

@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/objects/label.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/presentation/displayBuffer.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
@@ -167,6 +168,7 @@ public:
 	void Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer,
 	            uint32_t num_const_dw, int handle, int index, int flip_mode, int64_t flip_arg,
 	            bool trigger_agc_interrupt_on_done);
+	void SubmitFlipPreparation();
 	void Done();
 	void WaitForIdle();
 	bool IsIdle();
@@ -188,6 +190,7 @@ private:
 
 		CommandProcessor::FlipInfo flip;
 		bool                       trigger_agc_interrupt_on_done = false;
+		bool                       prepare_cpu_flip              = false;
 	};
 
 	static void ThreadBatchRun(void* data);
@@ -266,6 +269,7 @@ public:
 	            uint32_t num_const_dw, bool trigger_agc_interrupt_on_done);
 	void SubmitCompute(uint32_t queue, uint32_t* cmd_buffer, uint32_t num_dw,
 	                   bool trigger_agc_interrupt_on_done);
+	void SubmitFlipPreparation();
 	void Done();
 	void PauseSubmissions();
 	void ResumeSubmissions();
@@ -333,6 +337,11 @@ void Gpu::SubmitCompute(uint32_t queue, uint32_t* cmd_buffer, uint32_t num_dw,
 	auto* ring = GetRing(ring_id);
 
 	ring->Submit(cmd_buffer, num_dw, trigger_agc_interrupt_on_done);
+}
+
+void Gpu::SubmitFlipPreparation() {
+	GpuMutexLock lock(m_mutex);
+	m_gfx_ring->SubmitFlipPreparation();
 }
 
 void Gpu::Done() {
@@ -746,6 +755,26 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw,
 	m_cond_var.Signal();
 }
 
+void GraphicsRing::SubmitFlipPreparation() {
+	EXIT_IF(m_cp == nullptr);
+	Common::LockGuard lock(m_mutex);
+
+	WindowWaitForGraphicInitialized();
+	GraphicsRenderCreateContext();
+	if (m_done) {
+		while (!m_idle) {
+			m_idle_cond_var.Wait(&m_mutex);
+		}
+		m_done = false;
+		m_cp->Reset();
+	}
+
+	auto& batch            = m_cmd_batches.emplace_back();
+	batch.prepare_cpu_flip = true;
+	m_idle                 = false;
+	m_cond_var.Signal();
+}
+
 void GraphicsRing::Done() {
 	Common::LockGuard lock(m_mutex);
 	if (m_done) {
@@ -803,20 +832,22 @@ void GraphicsRing::ThreadBatchRun(void* data) {
 		cp->RunLock();
 		{
 			cp->BufferInit();
-			cp->ResetDeCe();
-			cp->SetFlip(buf.flip);
 			cp->SetSubmitId(++seq);
-
-			ring->m_draw_job.Execute(
-			    [cp, buf] { cp->Run(buf.draw_buffer.data, buf.draw_buffer.num_dw); });
-			ring->m_constant_job.Execute(
-			    [cp, buf] { cp->Run(buf.const_buffer.data, buf.const_buffer.num_dw); });
-			ring->m_draw_job.Wait();
-			ring->m_constant_job.Wait();
-
-			cp->BufferFlush();
-			if (buf.trigger_agc_interrupt_on_done) {
-				GraphicsRenderTriggerEopEvent(0);
+			if (buf.prepare_cpu_flip) {
+				cp->PrepareCpuFlip();
+			} else {
+				cp->ResetDeCe();
+				cp->SetFlip(buf.flip);
+				ring->m_draw_job.Execute(
+				    [cp, buf] { cp->Run(buf.draw_buffer.data, buf.draw_buffer.num_dw); });
+				ring->m_constant_job.Execute(
+				    [cp, buf] { cp->Run(buf.const_buffer.data, buf.const_buffer.num_dw); });
+				ring->m_draw_job.Wait();
+				ring->m_constant_job.Wait();
+				cp->BufferFlush();
+				if (buf.trigger_agc_interrupt_on_done) {
+					GraphicsRenderTriggerEopEvent(0);
+				}
 			}
 		}
 		cp->RunUnlock();
@@ -1812,8 +1843,12 @@ void CommandProcessor::Flip() {
 		LOGF("CommandProcessor::Flip()\n");
 	}
 
-	GraphicsRenderWriteAtEndOfPipeOnlyFlip(m_submit_id, CurrentBuffer(), m_flip.handle,
-	                                       m_flip.index, m_flip.flip_mode, m_flip.flip_arg);
+	auto* command = CurrentBuffer();
+	auto  request = GraphicsRenderPrepareDisplayBufferFlip(
+	     command, m_flip.handle, m_flip.index, m_flip.flip_mode, m_flip.flip_arg);
+	GraphicsRenderWriteAtEndOfPipeOnlyFlip(m_submit_id, command, m_flip.handle, m_flip.index,
+	                                       m_flip.flip_mode, m_flip.flip_arg, request);
+	m_scheduler.Flush();
 }
 
 void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
@@ -1828,12 +1863,16 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 		     reinterpret_cast<uint64_t>(dst_gpu_addr), value);
 	}
 
+	auto* command = CurrentBuffer();
+	auto  request = GraphicsRenderPrepareDisplayBufferFlip(
+	     command, m_flip.handle, m_flip.index, m_flip.flip_mode, m_flip.flip_arg);
 	CommandProcessorGuestAccessScope guest_access(CommandProcessorGuestAccess::DirectFence,
 	                                              reinterpret_cast<uint64_t>(dst_gpu_addr),
 	                                              sizeof(uint32_t));
 	GraphicsRenderWriteAtEndOfPipeWithFlip32(
-	    m_submit_id, CurrentBuffer(), static_cast<uint32_t*>(dst_gpu_addr), value, m_flip.handle,
-	    m_flip.index, m_flip.flip_mode, m_flip.flip_arg);
+	    m_submit_id, command, static_cast<uint32_t*>(dst_gpu_addr), value, m_flip.handle,
+	    m_flip.index, m_flip.flip_mode, m_flip.flip_arg, request);
+	m_scheduler.Flush();
 }
 
 void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action,
@@ -1851,16 +1890,36 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 		     eop_event_type, cache_action, reinterpret_cast<uint64_t>(dst_gpu_addr), value);
 	}
 
-	if (eop_event_type == 0x00000004 && cache_action == 0x00000038) {
-		CommandProcessorGuestAccessScope guest_access(CommandProcessorGuestAccess::DirectFence,
-		                                              reinterpret_cast<uint64_t>(dst_gpu_addr),
-		                                              sizeof(uint32_t));
-		GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(
-		    m_submit_id, CurrentBuffer(), static_cast<uint32_t*>(dst_gpu_addr), value,
-		    m_flip.handle, m_flip.index, m_flip.flip_mode, m_flip.flip_arg);
-	} else {
+	if (eop_event_type != 0x00000004 || cache_action != 0x00000038) {
 		EXIT("unknown event type\n");
 	}
+	auto* command = CurrentBuffer();
+	auto  request = GraphicsRenderPrepareDisplayBufferFlip(command, m_flip.handle, m_flip.index,
+	                                                       m_flip.flip_mode, m_flip.flip_arg);
+	CommandProcessorGuestAccessScope guest_access(CommandProcessorGuestAccess::DirectFence,
+	                                              reinterpret_cast<uint64_t>(dst_gpu_addr),
+	                                              sizeof(uint32_t));
+	GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(
+	    m_submit_id, command, static_cast<uint32_t*>(dst_gpu_addr), value, m_flip.handle,
+	    m_flip.index, m_flip.flip_mode, m_flip.flip_arg, request);
+	m_scheduler.Flush();
+}
+
+void CommandProcessor::PrepareCpuFlip() {
+	Common::LockGuard lock(m_mutex);
+	CheckBuffer();
+	if (g_current_run_cp != nullptr) {
+		EXIT("invalid graphics-thread CPU flip preparation\n");
+	}
+	struct RunScope {
+		explicit RunScope(CommandProcessor* cp) { g_current_run_cp = cp; }
+		~RunScope() { g_current_run_cp = nullptr; }
+	};
+	RunScope run_scope(this);
+
+	auto prepared_id = Presentation::DisplayBufferPrepareNextFlipOnGpu(CurrentBuffer());
+	m_scheduler.Flush();
+	Presentation::DisplayBufferCompleteFlipFromGpu(prepared_id);
 }
 
 void CommandProcessor::SynchronizeGpu() {
@@ -1892,6 +1951,11 @@ void GraphicsRunSubmitCompute(uint32_t queue, uint32_t* cmd_buffer, uint32_t num
 	EXIT_IF(g_gpu == nullptr);
 
 	g_gpu->SubmitCompute(queue, cmd_buffer, num_dw, trigger_agc_interrupt_on_done);
+}
+
+void GraphicsRunSubmitFlipPreparation() {
+	EXIT_IF(g_gpu == nullptr);
+	g_gpu->SubmitFlipPreparation();
 }
 
 void GraphicsRunWait() {

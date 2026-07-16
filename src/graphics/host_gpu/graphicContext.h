@@ -29,7 +29,6 @@ struct VulkanSwapchain {
 	std::unique_ptr<VkSemaphore[]>              render_complete_semaphores;
 	uint32_t                                    current_index = 0;
 	uint32_t                                    present_frame = 0;
-	std::vector<std::unique_ptr<CommandBuffer>> present_command_buffers;
 };
 
 struct VulkanCommandPool {

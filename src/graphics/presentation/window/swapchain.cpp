@@ -28,6 +28,7 @@
 #include "common/timer.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/utils.h"
 #include "graphics/host_gpu/vma.h"
 #include "graphics/presentation/renderDoc.h"
@@ -38,9 +39,11 @@
 #include "loader/systemContent.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fmt/format.h>
 #include <memory>
 #include <string>
@@ -54,6 +57,131 @@
 #define KYTY_DBG_INPUT
 
 namespace Libs::Graphics {
+
+struct PreparedFrame {
+	VulkanImage                   image {VulkanImageType::Unknown};
+	std::unique_ptr<CommandBuffer> present_commands;
+	bool                          busy = false;
+};
+
+class PreparedFramePool {
+public:
+	void EnsureCapacity(uint32_t count, VkFormat format) {
+		if (count == 0 || format == VK_FORMAT_UNDEFINED) {
+			EXIT("prepared-frame pool requires at least one frame\n");
+		}
+		Common::LockGuard lock(m_mutex);
+		m_format = format;
+		while (m_frames.size() < count) {
+			auto frame = std::make_unique<PreparedFrame>();
+			m_free.push_back(frame.get());
+			m_frames.push_back(std::move(frame));
+		}
+	}
+
+	VkFormat GetFormat() {
+		Common::LockGuard lock(m_mutex);
+		if (m_format == VK_FORMAT_UNDEFINED) {
+			EXIT("prepared-frame pool has no presentation format\n");
+		}
+		return m_format;
+	}
+
+	PreparedFrame* Acquire() {
+		m_mutex.Lock();
+		if (m_frames.empty()) {
+			EXIT("prepared-frame pool was used before swapchain initialization\n");
+		}
+		while (m_free.empty()) {
+			m_available.Wait(&m_mutex);
+		}
+		auto* frame = m_free.front();
+		m_free.pop_front();
+		if (frame->busy) {
+			EXIT("prepared-frame pool returned an invalid frame\n");
+		}
+		frame->busy = true;
+		m_mutex.Unlock();
+
+		// The producer only waits here. Reset stays on the presentation thread that owns the
+		// allocating Vulkan command pool.
+		if (frame->present_commands != nullptr) {
+			frame->present_commands->WaitForFenceOnly();
+		}
+
+		return frame;
+	}
+
+	void Release(PreparedFrame* frame) {
+		if (frame == nullptr) {
+			EXIT("cannot release a null prepared frame\n");
+		}
+		Common::LockGuard lock(m_mutex);
+		if (!frame->busy) {
+			EXIT("prepared frame was released twice\n");
+		}
+		frame->busy = false;
+		m_free.push_back(frame);
+		m_available.Signal();
+	}
+
+private:
+	Common::Mutex                               m_mutex;
+	Common::CondVar                             m_available;
+	std::vector<std::unique_ptr<PreparedFrame>> m_frames;
+	std::deque<PreparedFrame*>                  m_free;
+	VkFormat                                    m_format = VK_FORMAT_UNDEFINED;
+};
+
+static PreparedFramePool* GetPreparedFramePool() {
+	static auto* pool = new PreparedFramePool;
+	return pool;
+}
+
+static void ConfigurePreparedFrame(PreparedFrame* frame, VkExtent2D extent, VkFormat format) {
+	EXIT_IF(frame == nullptr);
+	EXIT_IF(g_window_ctx == nullptr);
+	if (extent.width == 0 || extent.height == 0 || format == VK_FORMAT_UNDEFINED) {
+		EXIT("unsupported prepared frame, extent=%ux%u format=%d\n", extent.width, extent.height,
+		     static_cast<int>(format));
+	}
+
+	auto*      ctx        = &g_window_ctx->graphic_ctx;
+	auto&      dst        = frame->image;
+	const bool compatible = dst.image != nullptr && dst.extent.width == extent.width &&
+	                        dst.extent.height == extent.height && dst.format == format;
+	if (compatible) {
+		return;
+	}
+	if (dst.image != nullptr) {
+		VulkanDeleteImage(ctx, &dst, &dst.memory);
+		dst = VulkanImage(VulkanImageType::Unknown);
+	}
+
+	dst.extent          = extent;
+	dst.format          = format;
+	dst.layers          = 1;
+	dst.mip_levels      = 1;
+	dst.layout          = VK_IMAGE_LAYOUT_UNDEFINED;
+	dst.memory.property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+	VkImageCreateInfo create {};
+	create.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	create.imageType     = VK_IMAGE_TYPE_2D;
+	create.extent        = {dst.extent.width, dst.extent.height, 1};
+	create.mipLevels     = 1;
+	create.arrayLayers   = 1;
+	create.format        = dst.format;
+	create.tiling        = VK_IMAGE_TILING_OPTIMAL;
+	create.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	create.usage         = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	create.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+	create.samples       = VK_SAMPLE_COUNT_1_BIT;
+	if (!VulkanCreateImage(ctx, &create, &dst, &dst.memory)) {
+		EXIT("failed to allocate prepared presentation image, extent=%ux%u format=%d\n",
+		     dst.extent.width, dst.extent.height, static_cast<int>(dst.format));
+	}
+}
 
 VulkanSwapchain::~VulkanSwapchain() = default;
 
@@ -189,6 +317,7 @@ VulkanSwapchain* VulkanCreateSwapchain(GraphicContext* ctx, uint32_t image_count
 		                           &s->render_complete_semaphores[i]);
 		EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 	}
+	GetPreparedFramePool()->EnsureCapacity(s->swapchain_images_count, s->swapchain_format);
 
 	return swapchain_owner.release();
 }
@@ -200,8 +329,6 @@ static void VulkanDeleteSwapchain(GraphicContext* ctx, VulkanSwapchain* s) {
 	auto swapchain_owner = std::unique_ptr<VulkanSwapchain>(s);
 
 	VulkanDeviceWaitIdle(ctx);
-
-	s->present_command_buffers.clear();
 
 	if (s->image_acquired_semaphores != nullptr) {
 		for (uint32_t i = 0; i < s->swapchain_images_count; i++) {
@@ -256,31 +383,56 @@ static void VulkanRecreateSwapchain() {
 	g_window_ctx->swapchain = VulkanCreateSwapchain(&g_window_ctx->graphic_ctx, 2);
 }
 
-static CommandBuffer* WindowGetPresentCommandBuffer(VulkanSwapchain* swapchain,
-                                                    uint32_t         present_frame) {
-	EXIT_IF(swapchain == nullptr);
-	EXIT_IF(swapchain->swapchain_images_count == 0);
-	EXIT_IF(present_frame >= swapchain->swapchain_images_count);
-
-	if (swapchain->present_command_buffers.empty()) {
-		swapchain->present_command_buffers.resize(swapchain->swapchain_images_count);
+static void ValidatePreparedCommand(CommandBuffer* buffer) {
+	if (buffer == nullptr || buffer->IsInvalid() || buffer->GetQueue() != GraphicContext::QUEUE_GFX) {
+		EXIT("prepared frames must be recorded on the graphics queue\n");
 	}
-	EXIT_IF(swapchain->present_command_buffers.size() != swapchain->swapchain_images_count);
-
-	auto& buffer = swapchain->present_command_buffers[present_frame];
-	if (buffer == nullptr) {
-		buffer = std::make_unique<CommandBuffer>(GraphicContext::QUEUE_GFX);
-	}
-
-	return buffer.get();
+	EXIT_IF(g_render_ctx == nullptr);
 }
 
-void WindowDrawBuffer(VideoOutVulkanImage* image) {
+PreparedFrame* WindowPrepareFrame(CommandBuffer* buffer, VideoOutVulkanImage* image) {
+	KYTY_PROFILER_FUNCTION();
+	ValidatePreparedCommand(buffer);
+	if (image->format == VK_FORMAT_UNDEFINED) {
+		EXIT("unsupported presentation source, image=%p\n", static_cast<const void*>(image));
+	}
+
+	auto*             frame = GetPreparedFramePool()->Acquire();
+	Common::LockGuard render_lock(g_render_ctx->GetMutex());
+	g_render_ctx->GetTextureCache()->RefreshVideoOut(image);
+	ConfigurePreparedFrame(frame, image->extent, image->format);
+	const std::array copies {ImageImageCopy {
+	    .src_image = image, .width = image->extent.width, .height = image->extent.height}};
+	UtilImageToImage(buffer, copies, &frame->image,
+	                 static_cast<uint64_t>(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL));
+	return frame;
+}
+
+PreparedFrame* WindowPrepareBlankFrame(CommandBuffer* buffer, uint32_t width, uint32_t height,
+                                       bool opaque) {
+	KYTY_PROFILER_FUNCTION();
+	ValidatePreparedCommand(buffer);
+	auto*             pool   = GetPreparedFramePool();
+	auto              format = pool->GetFormat();
+	auto*             frame  = pool->Acquire();
+	Common::LockGuard render_lock(g_render_ctx->GetMutex());
+	ConfigurePreparedFrame(frame, {width, height}, format);
+	const VkClearColorValue clear {{0.0f, 0.0f, 0.0f, opaque ? 1.0f : 0.0f}};
+	UtilClearColorImage(buffer, &frame->image, clear);
+	return frame;
+}
+
+void WindowPresentFrame(PreparedFrame* frame) {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_IF(image == nullptr);
+	EXIT_IF(frame == nullptr);
 	EXIT_IF(g_window_ctx == nullptr);
 	EXIT_IF(g_window_ctx->swapchain == nullptr);
+	struct ReleaseScope {
+		PreparedFrame* frame;
+		~ReleaseScope() { GetPreparedFramePool()->Release(frame); }
+	};
+	ReleaseScope release {frame};
 
 	if (g_window_ctx->window_hidden) {
 		WindowUpdateIcon();
@@ -295,9 +447,6 @@ void WindowDrawBuffer(VideoOutVulkanImage* image) {
 
 	const auto present_frame = swapchain->present_frame;
 	EXIT_IF(present_frame >= swapchain->swapchain_images_count);
-
-	auto& buffer = *WindowGetPresentCommandBuffer(swapchain, present_frame);
-	buffer.WaitForFenceAndReset();
 
 	swapchain->current_index = static_cast<uint32_t>(-1);
 
@@ -315,14 +464,17 @@ void WindowDrawBuffer(VideoOutVulkanImage* image) {
 		default: EXIT("vkAcquireNextImageKHR failed: %s\n", string_VkResult(result));
 	}
 	EXIT_NOT_IMPLEMENTED(swapchain->current_index == static_cast<uint32_t>(-1));
-
-	EXIT_NOT_IMPLEMENTED(buffer.IsInvalid());
+	if (frame->present_commands == nullptr) {
+		frame->present_commands = std::make_unique<CommandBuffer>(GraphicContext::QUEUE_GFX);
+	}
+	frame->present_commands->WaitForFenceAndReset();
+	auto& buffer = *frame->present_commands;
 
 	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
 
 	buffer.Begin();
 
-	UtilBlitImage(&buffer, image, swapchain);
+	UtilBlitPreparedImage(&buffer, &frame->image, swapchain);
 
 	VkImageMemoryBarrier pre_present_barrier {};
 	pre_present_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
