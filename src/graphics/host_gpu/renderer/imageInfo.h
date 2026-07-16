@@ -39,6 +39,7 @@ struct RenderTargetInfo {
 	uint32_t bytes_per_element = 0;
 	uint32_t tile_mode         = 0;
 	uint32_t levels            = 1;
+	uint32_t layers            = 1;
 };
 
 // Common image-to-buffer copy description. Storage images and render targets keep distinct
@@ -70,22 +71,23 @@ MakeColorImageTransferInfo(const RenderTargetInfo& info) noexcept {
 }
 
 struct DepthTargetInfo {
-	uint64_t address            = 0;
-	uint64_t size               = 0;
-	uint64_t stencil_address    = 0;
-	uint64_t stencil_size       = 0;
-	uint64_t htile_address      = 0;
-	uint64_t htile_size         = 0;
-	VkFormat format             = VK_FORMAT_UNDEFINED;
-	uint32_t guest_format       = 0;
-	uint32_t width              = 0;
-	uint32_t height             = 0;
-	uint32_t pitch              = 0;
-	uint32_t bytes_per_element  = 0;
-	uint32_t tile_mode          = 0;
-	bool     depth_load_clear   = false;
-	bool     stencil_load_clear = false;
-	bool     stencil_access     = false;
+	uint64_t address                  = 0;
+	uint64_t size                     = 0;
+	uint64_t stencil_address          = 0;
+	uint64_t stencil_size             = 0;
+	uint64_t htile_address            = 0;
+	uint64_t htile_size               = 0;
+	VkFormat format                   = VK_FORMAT_UNDEFINED;
+	uint32_t guest_format             = 0;
+	uint32_t width                    = 0;
+	uint32_t height                   = 0;
+	uint32_t pitch                    = 0;
+	uint32_t bytes_per_element        = 0;
+	uint32_t tile_mode                = 0;
+	uint32_t layers                   = 1;
+	bool     depth_load_clear         = false;
+	bool     stencil_load_clear       = false;
+	bool     stencil_access           = false;
 	bool     stencil_htile_compressed = false;
 };
 
@@ -163,25 +165,29 @@ struct VideoOutPixelFormatInfo {
 }
 
 [[nodiscard]] inline bool IsSupportedVideoOutFormat(uint32_t guest_format, VkFormat format) {
-	const bool rgba8 = guest_format == Prospero::GpuEnumValue(Prospero::BufferFormat::k8_8_8_8Srgb) &&
-	                   (format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_SRGB);
-	const bool rgb10 = guest_format == Prospero::GpuEnumValue(Prospero::BufferFormat::k10_10_10_2UNorm) &&
-	                   (format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
-	                    format == VK_FORMAT_A2R10G10B10_UNORM_PACK32);
+	const bool rgba8 =
+	    guest_format == Prospero::GpuEnumValue(Prospero::BufferFormat::k8_8_8_8Srgb) &&
+	    (format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_SRGB);
+	const bool rgb10 =
+	    guest_format == Prospero::GpuEnumValue(Prospero::BufferFormat::k10_10_10_2UNorm) &&
+	    (format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
+	     format == VK_FORMAT_A2R10G10B10_UNORM_PACK32);
 	return rgba8 || rgb10;
 }
 
-enum class DepthOverlap : uint8_t { None, RetireSampled, Unsupported };
+enum class DepthOverlap : uint8_t { None, RetireSampled, ExpandTarget, Unsupported };
 enum class DepthTransitionSource : uint8_t { None, Guest, Native };
 enum class RenderTargetOverlap : uint8_t {
 	None,
 	RetireSampled,
 	PreserveStorage,
+	ExpandTarget,
 	RetireTarget,
 	Unsupported
 };
 enum class SampledOverlap : uint8_t { None, ReadOnlyAlias, Unsupported };
 enum class StorageSampledOverlap : uint8_t { None, ExactImage, Unsupported };
+enum class StorageImageOverlap : uint8_t { None, RetireSampled, PageNeighbor, Unsupported };
 enum class HostWriteOverlap : uint8_t { None, InvalidateImage, Unsupported };
 enum class BufferImageAlias : uint8_t { None, VideoOutWrite, RenderTargetWrite, Unsupported };
 enum class MetaImageOverlap : uint8_t { RetainSampled, RetireTarget, Unsupported };
@@ -295,14 +301,15 @@ SelectDepthTransitionSource(bool depth_load_clear, bool sampled_native_available
                                                         uint64_t address, uint64_t size) {
 	const bool d32 =
 	    target.format == VK_FORMAT_D32_SFLOAT || target.format == VK_FORMAT_D32_SFLOAT_S8_UINT;
-	return address == target.address && size == target.size && d32 &&
+	return address == target.address && size == target.size && target.layers == 1 && d32 &&
 	       target.guest_format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32Float) &&
-	       target.bytes_per_element == 4 && target.tile_mode == Prospero::GpuEnumValue(Prospero::TileMode::kDepth) &&
+	       target.bytes_per_element == 4 &&
+	       target.tile_mode == Prospero::GpuEnumValue(Prospero::TileMode::kDepth) &&
 	       target.htile_address == 0 && target.htile_size == 0;
 }
 
 [[nodiscard]] inline bool CanLoadStencilAttachment(const DepthTargetInfo& target,
-                                                    bool                   stencil_initialized) {
+                                                   bool                   stencil_initialized) {
 	const bool has_stencil = target.stencil_address != 0 || target.stencil_size != 0;
 	return !has_stencil || !target.stencil_access || target.stencil_load_clear ||
 	       stencil_initialized;
@@ -448,11 +455,12 @@ ClassifyBufferImageAlias(uint64_t buffer_address, uint64_t buffer_size, uint64_t
 	      depth.format == VK_FORMAT_D32_SFLOAT && depth.bytes_per_element == 4));
 	const bool exact_depth_load =
 	    !has_stencil && !depth.depth_load_clear && sampled.address == depth.address &&
-	    sampled.size == depth.size && sampled.width == depth.width && sampled.height == depth.height &&
-	    sampled.pitch == depth.pitch && sampled.base_level == 0 && sampled.levels == 1 &&
-	    sampled.view_levels == 1 && sampled.tile == depth.tile_mode && sampled.depth == 1 &&
+	    sampled.size == depth.size && sampled.width == depth.width &&
+	    sampled.height == depth.height && sampled.pitch == depth.pitch && sampled.base_level == 0 &&
+	    sampled.levels == 1 && sampled.view_levels == 1 && sampled.tile == depth.tile_mode &&
+	    sampled.depth == 1 &&
 	    sampled.type == Prospero::GpuEnumValue(Prospero::ImageType::kColor2D) &&
-	    sampled.base_array == 0 && exact_depth_format;
+	    depth.layers == 1 && sampled.base_array == 0 && exact_depth_format;
 	if (!sampled_gpu_modified && exact_depth_load) {
 		return DepthOverlap::RetireSampled;
 	}
@@ -480,10 +488,11 @@ ClassifyRenderTargetOverlap(const ImageInfo& sampled, bool sampled_gpu_modified,
 	           : RenderTargetOverlap::Unsupported;
 }
 
-[[nodiscard]] inline RenderTargetOverlap ClassifyStorageRenderTargetOverlap(
-    const ImageInfo& storage, VkFormat storage_format, bool storage_gpu_modified,
-    bool storage_buffer_modified, bool storage_cpu_dirty, bool same_context,
-    const RenderTargetInfo& target) {
+[[nodiscard]] inline RenderTargetOverlap
+ClassifyStorageRenderTargetOverlap(const ImageInfo& storage, VkFormat storage_format,
+                                   bool storage_gpu_modified, bool storage_buffer_modified,
+                                   bool storage_cpu_dirty, bool same_context,
+                                   const RenderTargetInfo& target) {
 	if (!ImagePageRangesOverlap(storage.address, storage.size, target.address, target.size)) {
 		return RenderTargetOverlap::None;
 	}
@@ -494,7 +503,7 @@ ClassifyRenderTargetOverlap(const ImageInfo& sampled, bool sampled_gpu_modified,
 	    storage.base_level == 0 && storage.levels == 1 && storage.view_levels == 1 &&
 	    storage.tile == target.tile_mode && storage.depth == 1 &&
 	    storage.type == Prospero::GpuEnumValue(Prospero::ImageType::kColor2D) &&
-	    storage.base_array == 0 && target.levels == 1;
+	    storage.base_array == 0 && target.levels == 1 && target.layers == 1;
 	return exact_native_image && storage_gpu_modified && !storage_buffer_modified &&
 	               !storage_cpu_dirty && same_context
 	           ? RenderTargetOverlap::PreserveStorage
@@ -521,7 +530,83 @@ ClassifyRenderTargetOverlap(const ImageInfo& sampled, bool sampled_gpu_modified,
 	       cached.pitch == requested.pitch &&
 	       cached.bytes_per_element == requested.bytes_per_element &&
 	       cached.tile_mode == requested.tile_mode && cached.levels == requested.levels &&
+	       cached.layers == requested.layers &&
 	       IsRgba8SrgbReinterpretation(cached.format, requested.format);
+}
+
+[[nodiscard]] inline RenderTargetOverlap
+ClassifySampledRenderTargetOverlap(const ImageInfo& sampled, const RenderTargetInfo& target,
+                                   bool target_buffer_modified, bool same_context) {
+	if (!ImagePageRangesOverlap(sampled.address, sampled.size, target.address, target.size)) {
+		return RenderTargetOverlap::None;
+	}
+	return same_context && !target_buffer_modified ? RenderTargetOverlap::RetireTarget
+	                                               : RenderTargetOverlap::Unsupported;
+}
+
+[[nodiscard]] inline StorageImageOverlap
+ClassifyStorageImageOverlap(uint64_t requested_address, uint64_t requested_size,
+                            uint64_t cached_address, uint64_t cached_size, bool sampled,
+                            bool same_context, bool gpu_modified, bool buffer_modified,
+                            bool tracker_gpu_modified) {
+	if (!ImagePageRangesOverlap(requested_address, requested_size, cached_address, cached_size)) {
+		return StorageImageOverlap::None;
+	}
+	if (!ImageRangeOverlaps(requested_address, requested_size, cached_address, cached_size)) {
+		return StorageImageOverlap::PageNeighbor;
+	}
+	return sampled && same_context && !gpu_modified && !buffer_modified && !tracker_gpu_modified
+	           ? StorageImageOverlap::RetireSampled
+	           : StorageImageOverlap::Unsupported;
+}
+
+[[nodiscard]] inline constexpr bool LayeredBackingContains(uint64_t container_size,
+                                                           uint32_t container_layers,
+                                                           uint64_t view_size,
+                                                           uint32_t view_layers) {
+	return container_layers >= view_layers && container_layers != 0 && view_layers != 0 &&
+	       container_size % container_layers == 0 && view_size % view_layers == 0 &&
+	       container_size / container_layers == view_size / view_layers;
+}
+
+[[nodiscard]] inline constexpr bool
+LayeredPlaneContains(uint64_t container_address, uint64_t container_size, uint32_t container_layers,
+                     uint64_t view_address, uint64_t view_size, uint32_t view_layers) {
+	return container_address == 0 ? view_address == 0 && view_size == 0
+	                              : view_address == container_address &&
+	                                    LayeredBackingContains(container_size, container_layers,
+	                                                           view_size, view_layers);
+}
+
+[[nodiscard]] inline bool
+IsCompatibleRenderTargetBacking(const RenderTargetInfo& cached,
+                                const RenderTargetInfo& requested) noexcept {
+	return cached.address == requested.address &&
+	       LayeredBackingContains(cached.size, cached.layers, requested.size, requested.layers) &&
+	       cached.width == requested.width && cached.height == requested.height &&
+	       cached.pitch == requested.pitch &&
+	       cached.bytes_per_element == requested.bytes_per_element &&
+	       cached.tile_mode == requested.tile_mode && cached.levels == requested.levels &&
+	       (cached.format == requested.format ||
+	        IsRgba8SrgbReinterpretation(cached.format, requested.format));
+}
+
+[[nodiscard]] inline bool
+IsCompatibleDepthTargetBacking(const DepthTargetInfo& cached,
+                               const DepthTargetInfo& requested) noexcept {
+	return cached.address == requested.address &&
+	       LayeredBackingContains(cached.size, cached.layers, requested.size, requested.layers) &&
+	       LayeredPlaneContains(cached.stencil_address, cached.stencil_size, cached.layers,
+	                            requested.stencil_address, requested.stencil_size,
+	                            requested.layers) &&
+	       LayeredPlaneContains(cached.htile_address, cached.htile_size, cached.layers,
+	                            requested.htile_address, requested.htile_size, requested.layers) &&
+	       cached.format == requested.format && cached.guest_format == requested.guest_format &&
+	       cached.width == requested.width && cached.height == requested.height &&
+	       cached.pitch == requested.pitch &&
+	       cached.bytes_per_element == requested.bytes_per_element &&
+	       cached.tile_mode == requested.tile_mode &&
+	       cached.stencil_htile_compressed == requested.stencil_htile_compressed;
 }
 
 [[nodiscard]] inline RenderTargetOverlap
@@ -531,8 +616,15 @@ ClassifyRenderTargetOverlap(const RenderTargetInfo& cached, bool cached_gpu_modi
 	if (!ImagePageRangesOverlap(cached.address, cached.size, requested.address, requested.size)) {
 		return RenderTargetOverlap::None;
 	}
+	const bool expand = requested.layers > cached.layers &&
+	                    IsCompatibleRenderTargetBacking(requested, cached) &&
+	                    cached.format == requested.format;
+	if (expand && cached_gpu_modified && !cached_buffer_modified && same_context) {
+		return RenderTargetOverlap::ExpandTarget;
+	}
 	// For an equal-address allocation-pool entry, a changed block raster or block size is a new
-	// image allocation, not a view of the old image. In Kyty we can only retire an already-published target with page-isolated storage :)
+	// image allocation, not a view of the old image. In Kyty we can only retire an
+	// already-published target with page-isolated storage :)
 	const bool page_isolated =
 	    cached.address % TRACKER_PAGE_SIZE == 0 && cached.size % TRACKER_PAGE_SIZE == 0 &&
 	    requested.address % TRACKER_PAGE_SIZE == 0 && requested.size % TRACKER_PAGE_SIZE == 0;
@@ -543,6 +635,21 @@ ClassifyRenderTargetOverlap(const RenderTargetInfo& cached, bool cached_gpu_modi
 	               !cached_gpu_modified && !cached_buffer_modified && same_context
 	           ? RenderTargetOverlap::RetireTarget
 	           : RenderTargetOverlap::Unsupported;
+}
+
+[[nodiscard]] inline DepthOverlap ClassifyDepthTargetOverlap(const DepthTargetInfo& cached,
+                                                             bool cached_gpu_modified,
+                                                             bool cached_buffer_modified,
+                                                             bool same_context,
+                                                             const DepthTargetInfo& requested) {
+	if (!ImagePageRangesOverlap(cached.address, cached.size, requested.address, requested.size)) {
+		return DepthOverlap::None;
+	}
+	const bool expand =
+	    requested.layers > cached.layers && IsCompatibleDepthTargetBacking(requested, cached);
+	return expand && cached_gpu_modified && !cached_buffer_modified && same_context
+	           ? DepthOverlap::ExpandTarget
+	           : DepthOverlap::Unsupported;
 }
 
 } // namespace Libs::Graphics

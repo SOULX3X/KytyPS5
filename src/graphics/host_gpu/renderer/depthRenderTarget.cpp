@@ -115,6 +115,16 @@ void ResolveRenderDepthTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 	const bool msaa_compat          = depth_msaa_single_sample_compatible(z.z_info.num_samples);
 	const bool htile_stencil_compat = depth_htile_stencil_acceleration_compatible(
 	    has_stencil, has_htile, z.stencil_info.tile_stencil_disable);
+	const auto view = ResolveTargetViewInfo(z.depth_view.slice_start, z.depth_view.slice_max);
+	switch (view.type) {
+		case TargetViewType::Image2D: break;
+		case TargetViewType::Image2DArray:
+			DepthFatal("layered depth views are unsupported: base=%u count=%u", view.base_layer,
+			           view.layer_count);
+		case TargetViewType::Unsupported:
+			DepthFatal("invalid depth view: base=%u last=%u", z.depth_view.slice_start,
+			           z.depth_view.slice_max);
+	}
 	// Prospero defines the compression-disable bits as tile writeback policy. Vulkan attachments
 	// expose the same logical depth/stencil values regardless of the driver's backing compression.
 	if ((stencil_active && !has_stencil) || rc.resummarize_enable || rc.copy_centroid ||
@@ -123,8 +133,7 @@ void ResolveRenderDepthTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 	    z.stencil_info.partially_resident || z.z_info.plane_compression != 0 ||
 	    (z.z_info.num_samples != 0 && !msaa_compat) || z.z_info.num_mip_levels != 0 ||
 	    z.z_info.tile_mode_index != 0 || z.z_info.zrange_precision > 1 ||
-	    z.depth_view.current_mip_level != 0 || z.depth_view.slice_start != 0 ||
-	    z.depth_view.slice_max != 0 || z.depth_info.addr5_swizzle_mask != 0 ||
+	    z.depth_view.current_mip_level != 0 || z.depth_info.addr5_swizzle_mask != 0 ||
 	    z.depth_info.array_mode != 0 || z.depth_info.pipe_config != 0 ||
 	    z.depth_info.bank_width != 0 || z.depth_info.bank_height != 0 ||
 	    z.depth_info.macro_tile_aspect != 0 || z.depth_info.num_banks != 0 ||
@@ -171,6 +180,9 @@ void ResolveRenderDepthTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 	if (has_htile) {
 		if (z.htile_data_base_addr == 0 || (z.htile_data_base_addr & 0x7fffu) != 0) {
 			DepthFatal("invalid HTile metadata address");
+		}
+		if (z.depth_view.slice_max >= 32) {
+			DepthFatal("HTile clear tracking supports at most 32 slices");
 		}
 	} else if (z.htile_data_base_addr != 0) {
 		DepthFatal("HTile address without an enabled tile surface");
@@ -234,9 +246,6 @@ void ResolveRenderDepthTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 		    (has_htile != (htile_size.align == 32768 && htile_size.size != 0))) {
 			DepthFatal("unsupported depth/stencil/HTile footprint");
 		}
-		if (has_htile) {
-			g_render_ctx->GetTextureCache()->RegisterMeta(z.htile_data_base_addr, htile_size.size);
-		}
 	} else {
 		TileGetTextureTotalSize(guest_format, width, height, 1, pitch, 1,
 		                        Prospero::GpuEnumValue(Prospero::TileMode::kDepth), false,
@@ -253,16 +262,32 @@ void ResolveRenderDepthTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 		           z.pitch_height_valid ? 1u : 0u,
 		           (static_cast<uint64_t>(z.slice_div64_minus1) + 1u) * 64u);
 	}
+	if (depth_size.size > UINT64_MAX / view.image_layers ||
+	    stencil_size.size > UINT64_MAX / view.image_layers ||
+	    htile_size.size > UINT64_MAX / view.image_layers) {
+		DepthFatal("layered depth footprint overflow");
+	}
+	const auto depth_backing_size   = depth_size.size * view.image_layers;
+	const auto stencil_backing_size = stencil_size.size * view.image_layers;
+	const auto htile_backing_size   = htile_size.size * view.image_layers;
+	if (depth_backing_size > TRACKER_ADDRESS_SIZE - z.z_read_base_addr ||
+	    (has_stencil && stencil_backing_size > TRACKER_ADDRESS_SIZE - z.stencil_read_base_addr) ||
+	    (has_htile && htile_backing_size > TRACKER_ADDRESS_SIZE - z.htile_data_base_addr)) {
+		DepthFatal("layered depth backing range is invalid");
+	}
 	r->htile                = has_htile;
 	r->width                = width;
 	r->height               = height;
-	r->depth_buffer_size    = depth_size.size;
+	r->depth_buffer_size    = depth_backing_size;
 	r->depth_buffer_vaddr   = z.z_read_base_addr;
-	r->stencil_buffer_size  = has_stencil ? stencil_size.size : 0;
+	r->stencil_buffer_size  = has_stencil ? stencil_backing_size : 0;
 	r->stencil_buffer_vaddr = has_stencil ? z.stencil_read_base_addr : 0;
-	r->htile_buffer_size    = has_htile ? htile_size.size : 0;
+	r->htile_buffer_size    = has_htile ? htile_backing_size : 0;
 	r->htile_buffer_vaddr   = has_htile ? z.htile_data_base_addr : 0;
 	auto* cache             = g_render_ctx->GetTextureCache();
+	if (has_htile) {
+		cache->RegisterMeta(r->htile_buffer_vaddr, r->htile_buffer_size, view.image_layers);
+	}
 	if (has_htile && rc.depth_clear_enable && !cache->ClearMeta(z.htile_data_base_addr)) {
 		DepthFatal("failed to acquire HTile metadata for a depth clear");
 	}
@@ -333,6 +358,7 @@ void ResolveRenderDepthTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 	info.pitch              = pitch;
 	info.bytes_per_element  = bytes;
 	info.tile_mode          = Prospero::GpuEnumValue(Prospero::TileMode::kDepth);
+	info.layers             = view.image_layers;
 	info.depth_load_clear   = r->depth_load_clear_enable;
 	info.stencil_load_clear = rc.stencil_clear_enable;
 	info.stencil_access =
@@ -343,6 +369,8 @@ void ResolveRenderDepthTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 	info.stencil_htile_compressed =
 	    has_stencil && has_htile && !z.stencil_info.tile_stencil_disable;
 	r->vulkan_buffer = cache->FindDepthTarget(buffer, g_render_ctx->GetGraphicCtx(), info);
+	r->vulkan_view   = cache->GetDepthTargetAttachmentView(
+	    g_render_ctx->GetGraphicCtx(), r->vulkan_buffer, view.base_layer, view.layer_count);
 	if (meta_clear && !cache->TouchMeta(z.htile_data_base_addr, z.depth_view.slice_start, false)) {
 		DepthFatal("failed to consume HTile clear state");
 	}

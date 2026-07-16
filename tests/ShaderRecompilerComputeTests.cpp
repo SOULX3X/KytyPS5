@@ -10080,6 +10080,50 @@ void CheckOverlappingMetadataViews() {
   std::printf("[host]    %-32s ok\n", "OverlappingMetadataViews");
 }
 
+void CheckGpuMetadataReuse() {
+  constexpr uintptr_t base = 0x0000000200010000ull;
+  constexpr uint64_t allocation_size = 0x20000;
+  constexpr uint64_t metadata_size = 0x8000;
+  auto *memory = static_cast<uint8_t *>(VirtualAlloc(
+      reinterpret_cast<void *>(base), allocation_size,
+      MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+  Require("GpuMetadataReuse", "allocation",
+          memory == reinterpret_cast<void *>(base),
+          "fixed VirtualAlloc failed");
+
+  ResourceMutex resource_mutex;
+  CacheFaultContext fault_context;
+  PageManager page_manager(CacheFault, &fault_context);
+  BufferCache buffer_cache(page_manager, resource_mutex);
+  TextureCache texture_cache(page_manager, buffer_cache, resource_mutex);
+  fault_context.texture = &texture_cache;
+  buffer_cache.SetTextureCache(texture_cache);
+  page_manager.OnGpuMap(base, allocation_size);
+
+  texture_cache.RegisterMeta(base, metadata_size);
+  Require("GpuMetadataReuse", "clear", texture_cache.ClearMeta(base),
+          "metadata clear setup failed");
+  texture_cache.InvalidateMemoryFromGPU(base, allocation_size);
+  Require("GpuMetadataReuse", "discard",
+          !texture_cache.IsMeta(base) &&
+              !texture_cache.HasMetaRangeOverlap(base, allocation_size),
+          "fully overwritten metadata identity was retained");
+  texture_cache.RegisterMeta(base, metadata_size);
+  Require("GpuMetadataReuse", "re-register",
+          texture_cache.IsMetaRange(base, metadata_size) &&
+              texture_cache.ClearMeta(base),
+          "metadata identity could not be reused after a GPU overwrite");
+  texture_cache.InvalidateMemoryFromGPU(base + 0x1000, 0x1000);
+  Require("GpuMetadataReuse", "partial discard", !texture_cache.IsMeta(base),
+          "partially overwritten metadata identity was retained");
+
+  texture_cache.UnmapMemory(base, allocation_size);
+  page_manager.OnGpuUnmap(base, allocation_size);
+  Require("GpuMetadataReuse", "free", VirtualFree(memory, 0, MEM_RELEASE) != 0,
+          "VirtualFree failed");
+  std::printf("[host]    %-32s ok\n", "GpuMetadataReuse");
+}
+
 void CheckMetadataReuseDescriptors() {
   ValidateMetadataReuseTexture(BasicMetadataReuseResource(),
                                BasicMetadataReuseDescriptor(), 0x10000);
@@ -10219,6 +10263,22 @@ void CheckImageOverlapResolution() {
           ClassifySampledOverlap(sampled_alias, sampled, false, false) ==
               SampledOverlap::Unsupported,
           "cross-context sampled alias was admitted");
+  constexpr uint64_t storage_subrange = 0x649b0100;
+  constexpr uint64_t storage_subrange_size = 0x800;
+  constexpr uint64_t sampled_backing = 0x649a3000;
+  constexpr uint64_t sampled_backing_size = 0x24000;
+  Require("ImageOverlapResolution", "storage retires clean sampled backing",
+          ClassifyStorageImageOverlap(storage_subrange, storage_subrange_size,
+                                      sampled_backing, sampled_backing_size,
+                                      true, true, false, false, false) ==
+              StorageImageOverlap::RetireSampled,
+          "clean sampled subrange was not retired before storage creation");
+  Require("ImageOverlapResolution", "storage preserves dirty sampled backing",
+          ClassifyStorageImageOverlap(storage_subrange, storage_subrange_size,
+                                      sampled_backing, sampled_backing_size,
+                                      true, true, true, false, true) ==
+              StorageImageOverlap::Unsupported,
+          "GPU-owned sampled subrange was admitted as storage backing");
   ImageInfo page_left = sampled;
   page_left.size = TRACKER_PAGE_SIZE / 2;
   ImageInfo same_page = page_left;
@@ -10539,6 +10599,25 @@ void CheckImageOverlapResolution() {
           ClassifyRenderTargetOverlap(sampled, true, true, target) ==
               RenderTargetOverlap::Unsupported,
           "GPU-owned sampled allocation was retired for a render target");
+  ImageInfo partial_target_sample{};
+  partial_target_sample.address = 0x79b01000;
+  partial_target_sample.size = 0x20000;
+  RenderTargetInfo layered_target{};
+  layered_target.address = 0x79b10000;
+  layered_target.size = 0x60000;
+  Require("ImageOverlapResolution", "sampled partial target transition",
+          ClassifySampledRenderTargetOverlap(partial_target_sample,
+                                             layered_target, false, true) ==
+              RenderTargetOverlap::RetireTarget,
+          "sampled partial target alias was not routed through readback");
+  Require("ImageOverlapResolution", "sampled partial target rejection",
+          ClassifySampledRenderTargetOverlap(partial_target_sample,
+                                             layered_target, true, true) ==
+                  RenderTargetOverlap::Unsupported &&
+              ClassifySampledRenderTargetOverlap(
+                  partial_target_sample, layered_target, false, false) ==
+                  RenderTargetOverlap::Unsupported,
+          "buffer-owned or cross-context target alias was admitted");
 
   ImageInfo storage{};
   storage.address = 0x112cd0000ull;
@@ -11375,6 +11454,7 @@ int main(int argc, char **argv) {
   CheckStorageTextureAccessPermissions();
   CheckMetaOverlapDeaths();
   CheckOverlappingMetadataViews();
+  CheckGpuMetadataReuse();
   CheckMetadataReuseDescriptors();
   CheckImageOverlapResolution();
   CheckMsaaCompatibility();

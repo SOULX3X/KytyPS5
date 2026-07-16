@@ -238,10 +238,42 @@ static TextureVariant NativeTextureVariant(const ShaderRecompiler::IR::ImageReso
 }
 
 static bool IsSupportedSampledColorResource(const ShaderRecompiler::IR::ImageResource& resource) {
-	return resource.kind == ShaderRecompiler::IR::ResourceKind::Image &&
-	       resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2D &&
+	bool supported_dimension = false;
+	switch (resource.dimension) {
+		case ShaderRecompiler::Decoder::ImageDimension::Dim2D:
+		case ShaderRecompiler::Decoder::ImageDimension::Dim2DArray:
+			supported_dimension = true;
+			break;
+		default: break;
+	}
+	return resource.kind == ShaderRecompiler::IR::ResourceKind::Image && supported_dimension &&
 	       resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::None && resource.read &&
 	       !resource.written && !resource.atomic && !resource.depth_compare;
+}
+
+struct TargetTextureViewInfo {
+	VkImageViewType type        = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
+	uint32_t        base_layer  = 0;
+	uint32_t        layer_count = 0;
+};
+
+static TargetTextureViewInfo
+ResolveTargetTextureView(const ShaderRecompiler::IR::ImageResource& resource,
+                         Prospero::ImageType type, uint32_t base_layer, uint32_t image_layers) {
+	switch (type) {
+		case Prospero::ImageType::kColor2D:
+			return resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2D &&
+			               base_layer == 0 && image_layers == 1
+			           ? TargetTextureViewInfo {VK_IMAGE_VIEW_TYPE_2D, 0, 1}
+			           : TargetTextureViewInfo {};
+		case Prospero::ImageType::kColor2DArray:
+			return resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2DArray &&
+			               base_layer < image_layers
+			           ? TargetTextureViewInfo {VK_IMAGE_VIEW_TYPE_2D_ARRAY, base_layer,
+			                                    image_layers - base_layer}
+			           : TargetTextureViewInfo {};
+		default: return {};
+	}
 }
 
 static bool IsSupportedSampledDepthFormat(VkFormat image_format, uint32_t guest_format,
@@ -418,15 +450,17 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 		EXIT("unsupported texture mip view: base=%u last=%u levels=%u\n", base_level, last_level,
 		     levels);
 	}
-	const auto    view_levels = last_level - base_level + 1u;
-	const auto    depth       = static_cast<uint32_t>(descriptor.Depth()) + 1u;
-	const auto    tile        = descriptor.TileMode();
-	const auto    format      = descriptor.Format();
-	const auto    view_format = TextureGetFormat(format, storage ? TextureFormatUsage::Storage
-	                                                             : TextureFormatUsage::Sampled);
-	const auto    type        = static_cast<Prospero::ImageType>(descriptor.Type());
-	const auto    pitch       = TileGetTexturePitch(format, width, levels, tile);
-	const auto    swizzle     = descriptor.DstSelXYZW();
+	const auto view_levels = last_level - base_level + 1u;
+	const auto depth       = static_cast<uint32_t>(descriptor.Depth()) + 1u;
+	const auto tile        = descriptor.TileMode();
+	const auto format      = descriptor.Format();
+	const auto view_format = TextureGetFormat(format, storage ? TextureFormatUsage::Storage
+	                                                          : TextureFormatUsage::Sampled);
+	const auto type        = static_cast<Prospero::ImageType>(descriptor.Type());
+	const auto target_view =
+	    ResolveTargetTextureView(resource, type, descriptor.BaseArray5(), depth);
+	const auto    pitch   = TileGetTexturePitch(format, width, levels, tile);
+	const auto    swizzle = descriptor.DstSelXYZW();
 	TileSizeAlign size;
 	TileGetTextureTotalSize(format, width, height, depth, pitch, levels, tile,
 	                        type == Prospero::ImageType::kColor3D, &size);
@@ -465,11 +499,13 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 			} else {
 				if (!(storage ? IsSupportedStorageImageResource(resource)
 				              : IsSupportedSampledColorResource(resource)) ||
-				    image->type != VulkanImageType::RenderTexture || image->layers != 1 ||
-				    width != image->extent.width || height != image->extent.height || depth != 1 ||
+				    image->type != VulkanImageType::RenderTexture || width != image->extent.width ||
+				    height != image->extent.height ||
 				    (storage ? levels != 1 || base_level != 0
 				             : levels != image->mip_levels || base_level >= levels) ||
-				    descriptor.BaseArray5() != 0 || type != Prospero::ImageType::kColor2D) {
+				    target_view.type == VK_IMAGE_VIEW_TYPE_MAX_ENUM ||
+				    target_view.base_layer >= image->layers ||
+				    target_view.layer_count > image->layers - target_view.base_layer) {
 					EXIT("unsupported cached render-target image view: storage=%d resource=%u"
 					     " image_type=%u layers=%u extent=%ux%u/%ux%u depth=%u"
 					     " levels=%u/%u base_level=%u base_array=%u descriptor_type=%u\n",
@@ -485,12 +521,14 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 					image_view = g_render_ctx->GetTextureCache()->GetRenderTargetStorageView(
 					    g_render_ctx->GetGraphicCtx(),
 					    static_cast<RenderTextureVulkanImage*>(image), view_format, base_level,
-					    view_levels);
+					    view_levels, target_view.type, target_view.base_layer,
+					    target_view.layer_count);
 				} else {
 					image_view = g_render_ctx->GetTextureCache()->GetRenderTargetSampledView(
 					    g_render_ctx->GetGraphicCtx(),
 					    static_cast<RenderTextureVulkanImage*>(image), view_format, view,
-					    base_level, view_levels);
+					    base_level, view_levels, target_view.type, target_view.base_layer,
+					    target_view.layer_count);
 				}
 			}
 			if (image_view == nullptr && image->image_view[view] == nullptr) {

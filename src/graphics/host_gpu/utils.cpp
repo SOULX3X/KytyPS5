@@ -251,36 +251,56 @@ ConvertBufferImageCopies(std::span<const BufferImageCopy> regions) {
 
 	for (size_t i = 0; i < regions.size(); i++) {
 		const auto& r = regions[i];
-		vk_regions[i] =
-		    MakeBufferImageCopy(r.offset, r.pitch, VK_IMAGE_ASPECT_COLOR_BIT, r.dst_level,
-		                        r.dst_layer, {r.dst_x, r.dst_y, r.dst_z},
-		                        {r.width, (r.copy_height != 0 ? r.copy_height : r.height), 1});
+		vk_regions[i] = MakeBufferImageCopy(
+		    r.offset, r.pitch, r.aspect, r.dst_level, r.dst_layer, {r.dst_x, r.dst_y, r.dst_z},
+		    {r.width, (r.copy_height != 0 ? r.copy_height : r.height), 1});
+	}
+	return vk_regions;
+}
+
+[[nodiscard]] static std::span<const VkBufferImageCopy>
+ConvertImageBufferCopies(std::span<const ImageBufferCopy> regions) {
+	static thread_local std::vector<VkBufferImageCopy> vk_regions;
+	vk_regions.resize(regions.size());
+	for (size_t i = 0; i < regions.size(); i++) {
+		const auto& r = regions[i];
+		vk_regions[i] = MakeBufferImageCopy(
+		    r.offset, r.pitch, r.aspect, r.src_level, r.src_layer, {r.src_x, r.src_y, r.src_z},
+		    {r.width, r.copy_height != 0 ? r.copy_height : r.height, 1});
 	}
 	return vk_regions;
 }
 
 static void RecordImageToBuffer(CommandBuffer& command, VulkanImage& src_image,
-                                VulkanBuffer& dst_buffer, uint32_t dst_pitch,
-                                VkImageLayout final_layout, VkImageAspectFlags aspect) {
-	auto*      vk_command         = command.GetPool()->buffers[command.GetIndex()];
-	const auto transition_aspects = GetTransferAspects(src_image, aspect);
-
-	SetImageLayout(vk_command, &src_image, 0, VK_REMAINING_MIP_LEVELS, transition_aspects,
-	               src_image.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-
-	const auto region = MakeBufferImageCopy(0, dst_pitch, aspect, 0, 0, {0, 0, 0},
-	                                        {src_image.extent.width, src_image.extent.height, 1});
+                                VulkanBuffer& dst_buffer, std::span<const ImageBufferCopy> regions,
+                                VkImageLayout final_layout) {
+	auto*              vk_command = command.GetPool()->buffers[command.GetIndex()];
+	VkImageAspectFlags aspects    = 0;
+	for (const auto& region: regions) {
+		aspects |= GetTransferAspects(src_image, region.aspect);
+	}
+	SetImageLayout(vk_command, &src_image, 0, VK_REMAINING_MIP_LEVELS, aspects, src_image.layout,
+	               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	SetBufferMemoryBarrier(vk_command, dst_buffer.buffer, 0, VK_WHOLE_SIZE,
 	                       VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 	                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+	const auto copies = ConvertImageBufferCopies(regions);
 	vkCmdCopyImageToBuffer(vk_command, src_image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-	                       dst_buffer.buffer, 1, &region);
+	                       dst_buffer.buffer, static_cast<uint32_t>(copies.size()), copies.data());
 	SetBufferMemoryBarrier(vk_command, dst_buffer.buffer, 0, VK_WHOLE_SIZE,
 	                       VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT,
 	                       VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT);
-
-	SetImageLayout(vk_command, &src_image, 0, VK_REMAINING_MIP_LEVELS, transition_aspects,
+	SetImageLayout(vk_command, &src_image, 0, VK_REMAINING_MIP_LEVELS, aspects,
 	               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, final_layout);
+}
+
+static void RecordImageToBuffer(CommandBuffer& command, VulkanImage& src_image,
+                                VulkanBuffer& dst_buffer, uint32_t dst_pitch,
+                                VkImageLayout final_layout, VkImageAspectFlags aspect) {
+	const ImageBufferCopy region {
+	    0, dst_pitch, 0, src_image.extent.width, src_image.extent.height, 0, 0, 0, 0, 0, aspect};
+	RecordImageToBuffer(command, src_image, dst_buffer,
+	                    std::span<const ImageBufferCopy>(&region, 1), final_layout);
 }
 
 class ReusableStagingBuffer {
@@ -328,10 +348,13 @@ public:
 	                   uint64_t size, std::span<const BufferImageCopy> regions,
 	                   uint64_t dst_layout) {
 		RecordUpload<false>(ctx, src_data, size, [&](CommandBuffer* command, VkCommandBuffer) {
+			VkImageAspectFlags transition_aspects = 0;
+			for (const auto& region: regions) {
+				transition_aspects |= GetTransferAspects(*dst_image, region.aspect);
+			}
 			RecordBufferToImageCopy(*command, m_buffer, *dst_image,
-			                        ConvertBufferImageCopies(regions), VK_IMAGE_ASPECT_COLOR_BIT,
-			                        VK_IMAGE_LAYOUT_UNDEFINED,
-			                        static_cast<VkImageLayout>(dst_layout));
+			                        ConvertBufferImageCopies(regions), transition_aspects,
+			                        dst_image->layout, static_cast<VkImageLayout>(dst_layout));
 		});
 	}
 
@@ -346,6 +369,18 @@ public:
 			                    static_cast<VkImageLayout>(src_layout), aspect);
 		});
 
+		std::memcpy(dst_data, m_mapped_data, size);
+	}
+
+	void DownloadFromImage(GraphicContext* ctx, void* dst_data, uint64_t size,
+	                       std::span<const ImageBufferCopy> regions, VulkanImage* src_image,
+	                       uint64_t src_layout) {
+		Common::LockGuard lock(m_mutex);
+		EnsureBuffer(ctx, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+		ExecuteImmediateUtilCommands([&](CommandBuffer* command, VkCommandBuffer) {
+			RecordImageToBuffer(*command, *src_image, m_buffer, regions,
+			                    static_cast<VkImageLayout>(src_layout));
+		});
 		std::memcpy(dst_data, m_mapped_data, size);
 	}
 
@@ -583,7 +618,8 @@ static void SetImageLayout(VkCommandBuffer buffer, VulkanImage* dst_image, uint3
 
 static bool CopyBlockImageToCompressedImage(VkCommandBuffer vk_buffer, const ImageImageCopy& r,
                                             VulkanImage* dst_image) {
-	if (!UtilIsBcFormat(dst_image->format)) {
+	if (r.src_aspect != VK_IMAGE_ASPECT_COLOR_BIT || r.dst_aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
+	    !UtilIsBcFormat(dst_image->format)) {
 		return false;
 	}
 
@@ -637,8 +673,10 @@ void UtilImageToImage(CommandBuffer* buffer, std::span<const ImageImageCopy> reg
                       VulkanImage* dst_image, uint64_t dst_layout) {
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
-	bool same_image_copy = false;
+	bool               same_image_copy        = false;
+	VkImageAspectFlags dst_transition_aspects = 0;
 	for (const auto& r: regions) {
+		dst_transition_aspects |= GetTransferAspects(*dst_image, r.dst_aspect);
 		if (r.src_image == dst_image) {
 			same_image_copy = true;
 			break;
@@ -646,18 +684,18 @@ void UtilImageToImage(CommandBuffer* buffer, std::span<const ImageImageCopy> reg
 	}
 
 	if (same_image_copy) {
-		SetImageLayout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
+		SetImageLayout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, dst_transition_aspects,
 		               dst_image->layout, VK_IMAGE_LAYOUT_GENERAL);
 
 		for (const auto& r: regions) {
 			VkImageCopy region;
 
-			region.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+			region.srcSubresource.aspectMask     = r.src_aspect;
 			region.srcSubresource.mipLevel       = r.src_level;
 			region.srcSubresource.baseArrayLayer = r.src_layer;
 			region.srcSubresource.layerCount     = 1;
 			region.srcOffset                     = {r.src_x, r.src_y, r.src_z};
-			region.dstSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+			region.dstSubresource.aspectMask     = r.dst_aspect;
 			region.dstSubresource.mipLevel       = r.dst_level;
 			region.dstSubresource.baseArrayLayer = r.dst_layer;
 			region.dstSubresource.layerCount     = 1;
@@ -668,8 +706,9 @@ void UtilImageToImage(CommandBuffer* buffer, std::span<const ImageImageCopy> reg
 			auto restore_layout = VK_IMAGE_LAYOUT_GENERAL;
 			if (r.src_image != dst_image) {
 				restore_layout = r.src_image->layout;
-				SetImageLayout(vk_buffer, r.src_image, r.src_level, 1, VK_IMAGE_ASPECT_COLOR_BIT,
-				               restore_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+				SetImageLayout(vk_buffer, r.src_image, r.src_level, 1,
+				               GetTransferAspects(*r.src_image, r.src_aspect), restore_layout,
+				               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 				src_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 			}
 
@@ -677,51 +716,56 @@ void UtilImageToImage(CommandBuffer* buffer, std::span<const ImageImageCopy> reg
 			               VK_IMAGE_LAYOUT_GENERAL, 1, &region);
 
 			if (r.src_image != dst_image) {
-				SetImageLayout(vk_buffer, r.src_image, r.src_level, 1, VK_IMAGE_ASPECT_COLOR_BIT,
+				SetImageLayout(vk_buffer, r.src_image, r.src_level, 1,
+				               GetTransferAspects(*r.src_image, r.src_aspect),
 				               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, restore_layout);
 			}
 		}
 
-		SetImageLayout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
+		SetImageLayout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, dst_transition_aspects,
 		               VK_IMAGE_LAYOUT_GENERAL, static_cast<VkImageLayout>(dst_layout));
 		return;
 	}
 
-	SetImageLayout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
-	               VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	SetImageLayout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, dst_transition_aspects,
+	               dst_image->layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
 	for (const auto& r: regions) {
 		VkImageCopy region;
 
 		auto src_layout = r.src_image->layout;
 
-		if (CopyBlockImageToCompressedImage(vk_buffer, r, dst_image)) {
+		if (r.src_aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
+		    r.dst_aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
+		    CopyBlockImageToCompressedImage(vk_buffer, r, dst_image)) {
 			continue;
 		}
 
-		region.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.srcSubresource.aspectMask     = r.src_aspect;
 		region.srcSubresource.mipLevel       = r.src_level;
 		region.srcSubresource.baseArrayLayer = r.src_layer;
 		region.srcSubresource.layerCount     = 1;
 		region.srcOffset                     = {r.src_x, r.src_y, r.src_z};
-		region.dstSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.dstSubresource.aspectMask     = r.dst_aspect;
 		region.dstSubresource.mipLevel       = r.dst_level;
 		region.dstSubresource.baseArrayLayer = r.dst_layer;
 		region.dstSubresource.layerCount     = 1;
 		region.dstOffset                     = {r.dst_x, r.dst_y, r.dst_z};
 		region.extent                        = {r.width, r.height, 1};
 
-		SetImageLayout(vk_buffer, r.src_image, r.src_level, 1, VK_IMAGE_ASPECT_COLOR_BIT,
-		               src_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+		SetImageLayout(vk_buffer, r.src_image, r.src_level, 1,
+		               GetTransferAspects(*r.src_image, r.src_aspect), src_layout,
+		               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
 		vkCmdCopyImage(vk_buffer, r.src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		               dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-		SetImageLayout(vk_buffer, r.src_image, r.src_level, 1, VK_IMAGE_ASPECT_COLOR_BIT,
+		SetImageLayout(vk_buffer, r.src_image, r.src_level, 1,
+		               GetTransferAspects(*r.src_image, r.src_aspect),
 		               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src_layout);
 	}
 
-	SetImageLayout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT,
+	SetImageLayout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, dst_transition_aspects,
 	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<VkImageLayout>(dst_layout));
 }
 
@@ -952,6 +996,15 @@ void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t
 
 	GetStagingBuffer(StagingBufferType::ReadBack)
 	    ->DownloadFromImage(ctx, dst_data, size, dst_pitch, src_image, src_layout, aspect);
+}
+
+void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size,
+                    std::span<const ImageBufferCopy> regions, VulkanImage* src_image,
+                    uint64_t src_layout) {
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(size == 0 || regions.empty());
+	GetStagingBuffer(StagingBufferType::ReadBack)
+	    ->DownloadFromImage(ctx, dst_data, size, regions, src_image, src_layout);
 }
 
 void UtilSetImageLayoutOptimal(VulkanImage* image) {

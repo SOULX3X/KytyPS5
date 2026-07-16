@@ -70,6 +70,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* colors,
 		}
 		depth->format                   = VK_FORMAT_UNDEFINED;
 		depth->vulkan_buffer            = nullptr;
+		depth->vulkan_view              = nullptr;
 		depth->depth_test_enable        = false;
 		depth->depth_write_enable       = false;
 		depth->depth_bounds_test_enable = false;
@@ -97,6 +98,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* colors,
 		}
 		if (color_match &&
 		    f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) &&
+		    f.depth_view == (with_depth ? depth->vulkan_view : nullptr) &&
 		    f.depth_clear_enable == depth->depth_load_clear_enable &&
 		    f.stencil_clear_enable == depth->stencil_clear_enable &&
 		    f.depth_read_only == depth_read_only) {
@@ -237,7 +239,10 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* colors,
 		views[i] = colors[i].vulkan_view;
 	}
 	if (with_depth) {
-		views[color_count] = depth->vulkan_buffer->image_view[VulkanImage::VIEW_DEFAULT];
+		if (depth->vulkan_view == nullptr) {
+			EXIT("Framebuffer: depth attachment view is missing\n");
+		}
+		views[color_count] = depth->vulkan_view;
 	}
 
 	VkFramebufferCreateInfo framebuffer_info {};
@@ -268,6 +273,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* colors,
 		fnew.color_layout[i] = color_layout[i];
 	}
 	fnew.depth_id             = (with_depth ? depth->vulkan_buffer->memory.unique_id : 0);
+	fnew.depth_view           = (with_depth ? depth->vulkan_view : nullptr);
 	fnew.depth_clear_enable   = depth->depth_load_clear_enable;
 	fnew.stencil_clear_enable = depth->stencil_clear_enable;
 	fnew.depth_read_only      = depth_read_only;

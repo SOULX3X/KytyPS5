@@ -40,6 +40,24 @@ inline constexpr bool color_msaa_single_sample_compatible(uint32_t encoded_sampl
 	       depth_msaa_single_sample_compatible(encoded_fragments);
 }
 
+enum class TargetViewType : uint8_t { Image2D, Image2DArray, Unsupported };
+
+struct TargetViewInfo {
+	TargetViewType type         = TargetViewType::Unsupported;
+	uint32_t       base_layer   = 0;
+	uint32_t       layer_count  = 0;
+	uint32_t       image_layers = 0;
+};
+
+inline constexpr TargetViewInfo ResolveTargetViewInfo(uint32_t base_layer, uint32_t last_layer,
+                                                      uint32_t draw_layer_offset = 0) {
+	if (base_layer > last_layer || draw_layer_offset != 0) {
+		return {};
+	}
+	return {base_layer == last_layer ? TargetViewType::Image2D : TargetViewType::Image2DArray,
+	        base_layer, last_layer - base_layer + 1u, last_layer + 1u};
+}
+
 inline constexpr bool depth_htile_stencil_acceleration_compatible(bool has_stencil, bool has_htile,
                                                                   bool acceleration_disabled) {
 	return acceleration_disabled || (has_stencil && has_htile);
@@ -147,8 +165,8 @@ static_assert(std::is_trivially_copyable_v<PipelineDynamicParameters>);
 static_assert(std::is_standard_layout_v<PipelineDynamicParameters>);
 static_assert(alignof(PipelineDynamicParameters) == 1);
 static_assert(sizeof(PipelineDynamicParameters) ==
-              sizeof(bool) + sizeof(float[3]) + sizeof(float[3]) + sizeof(int[4]) +
-                  sizeof(float) + sizeof(uint32_t) + sizeof(bool[RENDER_COLOR_ATTACHMENTS_MAX]) +
+              sizeof(bool) + sizeof(float[3]) + sizeof(float[3]) + sizeof(int[4]) + sizeof(float) +
+                  sizeof(uint32_t) + sizeof(bool[RENDER_COLOR_ATTACHMENTS_MAX]) +
                   sizeof(PipelineStencilDynamicState) * 2);
 
 struct RenderDepthInfo {
@@ -183,6 +201,7 @@ struct RenderDepthInfo {
 	PipelineStencilDynamicState stencil_dynamic_front;
 	PipelineStencilDynamicState stencil_dynamic_back;
 	DepthStencilVulkanImage*    vulkan_buffer = nullptr;
+	VkImageView                 vulkan_view   = nullptr;
 	uint64_t                    vaddr[3]      = {};
 	uint64_t                    size[3]       = {};
 	int                         vaddr_num     = 0;

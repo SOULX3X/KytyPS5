@@ -608,7 +608,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 			image_memory_barrier.subresourceRange.baseMipLevel   = 0;
 			image_memory_barrier.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
 			image_memory_barrier.subresourceRange.baseArrayLayer = 0;
-			image_memory_barrier.subresourceRange.layerCount     = 1;
+			image_memory_barrier.subresourceRange.layerCount     = colors[i].vulkan_buffer->layers;
 
 			vkCmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
 			                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
@@ -646,7 +646,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		image_memory_barrier.subresourceRange.baseMipLevel   = 0;
 		image_memory_barrier.subresourceRange.levelCount     = 1;
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
-		image_memory_barrier.subresourceRange.layerCount     = 1;
+		image_memory_barrier.subresourceRange.layerCount     = depth->vulkan_buffer->layers;
 
 		vkCmdPipelineBarrier(
 		    buffer, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,

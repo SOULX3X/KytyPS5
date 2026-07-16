@@ -19,11 +19,11 @@ public:
 	void DetileImage(GraphicContext* ctx, GpuTextureVulkanImage* image, const ImageInfo& info,
 	                 const BufferImageCopySource& source, bool refresh, bool storage) const;
 	void DetileImage(GraphicContext* ctx, DepthStencilVulkanImage* image,
-	                 const DepthTargetInfo& info, const BufferImageCopySource& source,
-	                 bool refresh) const;
+	                 const DepthTargetInfo& info, const BufferImageCopySource& source, bool refresh,
+	                 uint32_t base_layer = 0) const;
 	void DetileStencil(GraphicContext* ctx, DepthStencilVulkanImage* image,
 	                   const DepthTargetInfo& info, const BufferImageCopySource& source,
-	                   bool refresh) const;
+	                   bool refresh, uint32_t base_layer = 0) const;
 	void TileImage(void* dst, const void* src, const RenderTargetInfo& info) const;
 	void TileImage(void* dst, const void* src, const DepthTargetInfo& info) const;
 };

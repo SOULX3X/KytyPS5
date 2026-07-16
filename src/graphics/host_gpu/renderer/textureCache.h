@@ -31,7 +31,8 @@ class ResourceMutex;
 
 class TextureCache {
 public:
-	TextureCache(PageManager& page_manager, BufferCache& buffer_cache, ResourceMutex& resource_mutex);
+	TextureCache(PageManager& page_manager, BufferCache& buffer_cache,
+	             ResourceMutex& resource_mutex);
 	~TextureCache();
 	KYTY_CLASS_NO_COPY(TextureCache);
 
@@ -61,31 +62,41 @@ public:
 	                                                                uint64_t vaddr, uint64_t size);
 	[[nodiscard]] VkImageView GetRenderTargetAttachmentView(GraphicContext*           ctx,
 	                                                        RenderTextureVulkanImage* image,
-	                                                        VkFormat format, uint32_t level);
+	                                                        VkFormat format, uint32_t level,
+	                                                        uint32_t base_layer,
+	                                                        uint32_t layer_count);
+	[[nodiscard]] VkImageView GetDepthTargetAttachmentView(GraphicContext*          ctx,
+	                                                       DepthStencilVulkanImage* image,
+	                                                       uint32_t                 base_layer,
+	                                                       uint32_t                 layer_count);
 	[[nodiscard]] VkImageView GetRenderTargetSampledView(GraphicContext*           ctx,
 	                                                     RenderTextureVulkanImage* image,
 	                                                     VkFormat view_format, int variant,
-	                                                     uint32_t base_level, uint32_t level_count);
+	                                                     uint32_t base_level, uint32_t level_count,
+	                                                     VkImageViewType type, uint32_t base_layer,
+	                                                     uint32_t layer_count);
 	[[nodiscard]] VkImageView GetRenderTargetStorageView(GraphicContext*           ctx,
 	                                                     RenderTextureVulkanImage* image,
 	                                                     VkFormat view_format, uint32_t base_level,
-	                                                     uint32_t level_count);
+	                                                     uint32_t level_count, VkImageViewType type,
+	                                                     uint32_t base_layer, uint32_t layer_count);
 	[[nodiscard]] VkImageView GetStorageTextureSampledView(GraphicContext*            ctx,
 	                                                       StorageTextureVulkanImage* image,
 	                                                       const ImageInfo&           info);
 	[[nodiscard]] DepthStencilVulkanImage* FindDepthTargetByRange(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool                     HasPageOverlap(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool                     HasRangeOverlap(uint64_t vaddr, uint64_t size);
-	[[nodiscard]] bool                     HasGpuModifiedRangeOverlap(uint64_t vaddr, uint64_t size);
-	[[nodiscard]] bool                     HasGpuTargetPageOverlap(uint64_t vaddr, uint64_t size);
-	void                                   RegisterMeta(uint64_t vaddr, uint64_t size);
-	[[nodiscard]] bool                     IsMeta(uint64_t vaddr);
-	[[nodiscard]] bool                     IsMetaRange(uint64_t vaddr, uint64_t size);
-	[[nodiscard]] bool                     HasMetaOverlap(uint64_t vaddr, uint64_t size);
-	[[nodiscard]] bool                     IsMetaGpuModified(uint64_t vaddr, uint64_t size);
-	[[nodiscard]] bool                     IsMetaCleared(uint64_t vaddr, uint32_t slice);
-	[[nodiscard]] bool                     ClearMeta(uint64_t vaddr);
-	[[nodiscard]] bool                     TouchMeta(uint64_t vaddr, uint32_t slice, bool is_clear);
+	[[nodiscard]] bool HasGpuModifiedRangeOverlap(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool HasGpuTargetPageOverlap(uint64_t vaddr, uint64_t size);
+	void               RegisterMeta(uint64_t vaddr, uint64_t size, uint32_t layers = 1);
+	[[nodiscard]] bool IsMeta(uint64_t vaddr);
+	[[nodiscard]] bool IsMetaRange(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool HasMetaRangeOverlap(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool HasMetaOverlap(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool IsMetaGpuModified(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool IsMetaCleared(uint64_t vaddr, uint32_t slice);
+	[[nodiscard]] bool ClearMeta(uint64_t vaddr);
+	[[nodiscard]] bool TouchMeta(uint64_t vaddr, uint32_t slice, bool is_clear);
 	[[nodiscard]] bool InvalidateMemory(PageFaultAccess access, uint64_t vaddr, uint64_t size,
 	                                    PageFaultPhase phase) noexcept;
 	void               UnmapMemory(uint64_t vaddr, uint64_t size);
@@ -106,6 +117,7 @@ private:
 	struct ReadbackWorker;
 	struct MetaDataInfo {
 		uint64_t size         = 0;
+		uint32_t layers       = 1;
 		uint32_t clear_mask   = 0;
 		bool     gpu_modified = false;
 	};
@@ -115,9 +127,13 @@ private:
 	                                                              uint64_t size) const;
 	void                       RequireNoMetaOverlapLocked(uint64_t vaddr, uint64_t size) const;
 	void                       MarkSampledAliasesCpuDirtyLocked(uint64_t vaddr, uint64_t size);
+	void RetireSampledTargetAliases(GraphicContext* ctx, const ImageInfo& requested);
+	void RetireStoragePageNeighbors(GraphicContext* ctx, const ImageInfo& requested);
+	void RequireRetirementIsolation(const std::vector<CachedImage*>& retire, const char* operation,
+	                                uint64_t address, uint64_t size) const;
 	void RetireImages(const std::vector<CachedImage*>& retire,
-	                  const CachedImage* native_storage_source = nullptr);
-	void                       SynchronizeRenderTargetToBufferLocked(CachedImage& cached);
+	                  const CachedImage*               native_image_source = nullptr);
+	void SynchronizeRenderTargetToBufferLocked(CachedImage& cached);
 
 	Common::Mutex                             m_dummy_mutex;
 	std::array<VulkanImage*, 4>               m_dummy_sampled_textures {};

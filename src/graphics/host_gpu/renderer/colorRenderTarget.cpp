@@ -315,9 +315,20 @@ void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 	}
 	const bool msaa_compat =
 	    color_msaa_single_sample_compatible(rt.attrib.num_samples, rt.attrib.num_fragments);
-	if ((!msaa_compat && (rt.attrib.num_samples != 0 || rt.attrib.num_fragments != 0)) ||
-	    rt.view.base_array_slice_index != 0 || render_target_slice_offset != 0) {
-		EXIT("multisampled or sliced render targets are unsupported\n");
+	if (!msaa_compat && (rt.attrib.num_samples != 0 || rt.attrib.num_fragments != 0)) {
+		EXIT("multisampled render targets are unsupported\n");
+	}
+	const auto view = ResolveTargetViewInfo(
+	    rt.view.base_array_slice_index, rt.view.last_array_slice_index, render_target_slice_offset);
+	switch (view.type) {
+		case TargetViewType::Image2D: break;
+		case TargetViewType::Image2DArray:
+			EXIT("layered render-target views are unsupported: base=%u count=%u\n", view.base_layer,
+			     view.layer_count);
+		case TargetViewType::Unsupported:
+			EXIT("invalid render-target view: base=%u last=%u draw_offset=%u\n",
+			     rt.view.base_array_slice_index, rt.view.last_array_slice_index,
+			     render_target_slice_offset);
 	}
 	const uint32_t levels = rt.attrib2.num_mip_levels + 1u;
 	if (levels == 0 || levels > 16 || rt.view.current_mip_level >= levels) {
@@ -409,15 +420,16 @@ void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 	} else {
 		size = static_cast<uint64_t>(pitch) * height * bytes_per_element;
 	}
-	if (size == 0 || size > TRACKER_ADDRESS_SIZE - rt.base.addr) {
+	if (size == 0 || size > UINT64_MAX / view.image_layers) {
 		EXIT("render-target memory footprint is invalid\n");
 	}
+	const auto backing_size = size * view.image_layers;
+	if (backing_size > TRACKER_ADDRESS_SIZE - rt.base.addr) {
+		EXIT("render-target backing range is invalid\n");
+	}
 
-	const auto effective_slice = rt.view.base_array_slice_index + render_target_slice_offset;
-	const auto effective_base  = rt.base.addr + static_cast<uint64_t>(size) * effective_slice;
-
-	auto video_image       = Presentation::DisplayBufferFind(effective_base, true);
-	bool render_to_texture = (video_image.image == nullptr);
+	auto video_image       = Presentation::DisplayBufferFind(rt.base.addr, true);
+	bool render_to_texture = view.base_layer != 0 || video_image.image == nullptr;
 	if (!render_to_texture && (levels != 1 || rt.view.current_mip_level != 0)) {
 		EXIT("mipmapped display render targets are unsupported\n");
 	}
@@ -430,7 +442,7 @@ void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 		     " extent=%ux%u view_mip=%u view_extent=%ux%u levels=%u pitch=%u"
 		     " fmt=0x%08" PRIx32 " nfmt=0x%08" PRIx32 " order=0x%08" PRIx32
 		     " tile=%s target=%s video_size=0x%016" PRIx64 " video_pitch=%" PRIu64 "\n",
-		     rt_slot, effective_base, size, width, height, rt.view.current_mip_level,
+		     rt_slot, rt.base.addr, backing_size, width, height, rt.view.current_mip_level,
 		     view_extent.width, view_extent.height, levels, pitch, rt.info.format,
 		     rt.info.channel_type, rt.info.channel_order, tile ? "tiled" : "linear",
 		     render_to_texture ? "RenderTexture" : "DisplayBuffer", video_image.size,
@@ -443,8 +455,8 @@ void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 
 		(void)reuse_existing_render_texture;
 		RenderTargetInfo target {};
-		target.address           = effective_base;
-		target.size              = size;
+		target.address           = rt.base.addr;
+		target.size              = backing_size;
 		target.format            = rt_format.format;
 		target.width             = width;
 		target.height            = height;
@@ -452,18 +464,20 @@ void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 		target.bytes_per_element = rt_format.bytes_per_element;
 		target.tile_mode         = rt.attrib3.tile_mode;
 		target.levels            = levels;
+		target.layers            = view.image_layers;
 		auto* texture_cache      = g_render_ctx->GetTextureCache();
 		auto* buffer_vulkan =
 		    texture_cache->FindRenderTarget(buffer, g_render_ctx->GetGraphicCtx(), target);
 		r->type          = RenderColorType::RenderTexture;
-		r->base_addr     = effective_base;
+		r->base_addr     = rt.base.addr;
 		r->vulkan_buffer = buffer_vulkan;
 		r->vulkan_view   = texture_cache->GetRenderTargetAttachmentView(
-		    g_render_ctx->GetGraphicCtx(), buffer_vulkan, target.format, rt.view.current_mip_level);
+		    g_render_ctx->GetGraphicCtx(), buffer_vulkan, target.format, rt.view.current_mip_level,
+		    view.base_layer, view.layer_count);
 		r->format         = target.format;
 		r->extent         = view_extent;
 		r->base_mip_level = rt.view.current_mip_level;
-		r->buffer_size    = size;
+		r->buffer_size    = backing_size;
 	} else {
 		const auto layout = static_cast<Prospero::ChannelLayout>(rt.info.format);
 		const auto type   = static_cast<Prospero::ChannelType>(rt.info.channel_type);
@@ -489,7 +503,7 @@ void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 		EXIT_NOT_IMPLEMENTED(video_image.size < size);
 		EXIT_NOT_IMPLEMENTED(video_image.pitch != pitch);
 		r->type           = RenderColorType::DisplayBuffer;
-		r->base_addr      = effective_base;
+		r->base_addr      = rt.base.addr;
 		r->vulkan_buffer  = video_image.image;
 		r->vulkan_view    = video_image.image->image_view[VulkanImage::VIEW_DEFAULT];
 		r->format         = video_image.image->format;
