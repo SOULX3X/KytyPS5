@@ -151,9 +151,11 @@ static BufferView NativeStorageBuffer(uint64_t submit_id, CommandBuffer* command
 	                                      const ShaderBufferResource&                 descriptor,
 	                                      const ShaderRecompiler::IR::BufferResource& resource) {
 	BufferView result;
+
+	//Regression
 	// Bind a null buffer when these four dwords are
 	// the tracked prefix of an active image sharp. Image validity is encoded by dword 3 bit 31.
-	if (resource.image_alias != ShaderRecompiler::IR::BufferResource::NoImageAlias &&
+	/*if (resource.image_alias != ShaderRecompiler::IR::BufferResource::NoImageAlias &&
 	    (descriptor.Type() & 2u) != 0) {
 		BindNullStorageBuffer(command_buffer, &result);
 		return result;
@@ -201,7 +203,7 @@ static BufferView NativeStorageBuffer(uint64_t submit_id, CommandBuffer* command
 		result.offset = binding.second;
 		result.range  = footprint.size;
 		return result;
-	}
+	}*/
 	const auto address = descriptor.Base48();
 	const auto stride  = descriptor.Stride();
 	const auto records = descriptor.NumRecords();
