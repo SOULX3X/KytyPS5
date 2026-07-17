@@ -1,12 +1,12 @@
 name: Build KytyPS5
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
       - master
   pull_request:
-  workflow_dispatch:
 
 jobs:
   build:
@@ -22,8 +22,13 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Setup MSVC
+      - name: Setup Visual Studio Environment
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
 
       - name: Install Qt 6.10.3
         uses: jurplel/install-qt-action@v4
@@ -40,34 +45,48 @@ jobs:
           version: 1.4.335.0
           cache: true
 
-      - name: Show environment
+      - name: Verify Environment
         shell: cmd
         run: |
-          echo ===== Qt =====
-          echo Qt6_DIR=%Qt6_DIR%
-          echo ===== Vulkan =====
-          echo VULKAN_SDK=%VULKAN_SDK%
-          dir "%VULKAN_SDK%"
+          echo ===== CLANG =====
+          where clang-cl
+          clang-cl --version
 
-      - name: Configure CMake
+          echo ===== NINJA =====
+          ninja --version
+
+          echo ===== CMAKE =====
+          cmake --version
+
+          echo ===== QT =====
+          echo Qt6_DIR=%Qt6_DIR%
+
+          echo ===== VULKAN =====
+          echo %VULKAN_SDK%
+
+      - name: Configure
         shell: cmd
         run: |
-          cmake -S src ^
-                -B build ^
-                -G "Visual Studio 17 2022" ^
-                -A x64 ^
-                -DCMAKE_BUILD_TYPE=%BUILD_TYPE%
+          cmake ^
+            -S src ^
+            -B build ^
+            -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_C_COMPILER=clang-cl ^
+            -DCMAKE_CXX_COMPILER=clang-cl
 
       - name: Build
         shell: cmd
         run: |
-          cmake --build build --config %BUILD_TYPE% --parallel
+          cmake --build build --target launcher --parallel
 
-      - name: Upload Build Artifacts
+      - name: Install
+        shell: cmd
+        run: |
+          cmake --install build --prefix build/install
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: KytyPS5-Windows
-          path: |
-            build/**/*.exe
-            build/**/*.dll
-            build/**/*.pdb
+          path: build/install
