@@ -1557,11 +1557,10 @@ VkImageView TextureCache::GetRenderTargetStorageView(GraphicContext*           c
 VkImageView TextureCache::GetStorageTextureSampledView(GraphicContext*            ctx,
                                                        StorageTextureVulkanImage* image,
                                                        const ImageInfo&           info) {
-	const bool image_2d =
-	    info.type == Prospero::GpuEnumValue(Prospero::ImageType::kColor2D) && info.depth == 1;
-	const bool image_3d =
-	    info.type == Prospero::GpuEnumValue(Prospero::ImageType::kColor3D) && info.depth != 0;
-	if (ctx == nullptr || image == nullptr || image->image == nullptr || (!image_2d && !image_3d) ||
+	const auto shape = SelectStorageSampledViewShape(
+	    info.type, info.depth, image != nullptr ? image->layers : 0);
+	if (ctx == nullptr || image == nullptr || image->image == nullptr ||
+	    shape == StorageSampledViewShape::Unsupported ||
 	    info.base_array != 0 || info.levels != image->mip_levels ||
 	    info.base_level >= info.levels || info.view_levels == 0 ||
 	    info.base_level + info.view_levels > info.levels) {
@@ -1593,14 +1592,19 @@ VkImageView TextureCache::GetStorageTextureSampledView(GraphicContext*          
 	create.sType                         = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 	create.pNext                         = &usage;
 	create.image                         = image->image;
-	create.viewType                      = image_3d ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
+	create.viewType = shape == StorageSampledViewShape::Image3D
+	                      ? VK_IMAGE_VIEW_TYPE_3D
+	                      : shape == StorageSampledViewShape::Image2DArray
+	                            ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+	                            : VK_IMAGE_VIEW_TYPE_2D;
 	create.format                        = view_format;
 	create.components                    = TextureGetComponentMapping(info.swizzle);
 	create.subresourceRange.aspectMask   = VK_IMAGE_ASPECT_COLOR_BIT;
 	create.subresourceRange.baseMipLevel = info.base_level;
 	create.subresourceRange.levelCount   = info.view_levels;
 	create.subresourceRange.baseArrayLayer = 0;
-	create.subresourceRange.layerCount     = 1;
+	create.subresourceRange.layerCount =
+	    shape == StorageSampledViewShape::Image2DArray ? info.depth : 1;
 	VkImageView view                       = nullptr;
 	const auto  result = vkCreateImageView(ctx->device, &create, nullptr, &view);
 	if (result != VK_SUCCESS || view == nullptr) {
