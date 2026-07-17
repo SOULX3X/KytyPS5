@@ -887,32 +887,11 @@ void CreateRenderTargetViews(GraphicContext* ctx, RenderTextureVulkanImage* imag
 	CreateRenderTargetView(ctx, image, VulkanImage::VIEW_DEFAULT, VK_COMPONENT_SWIZZLE_IDENTITY,
 	                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
 	                       VK_COMPONENT_SWIZZLE_IDENTITY);
-	CreateRenderTargetView(ctx, image, VulkanImage::VIEW_BGRA, VK_COMPONENT_SWIZZLE_B,
-	                       VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R,
-	                       VK_COMPONENT_SWIZZLE_IDENTITY);
-	CreateRenderTargetView(ctx, image, VulkanImage::VIEW_R001, VK_COMPONENT_SWIZZLE_R,
-	                       VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO,
-	                       VK_COMPONENT_SWIZZLE_ONE);
-	CreateRenderTargetView(ctx, image, VulkanImage::VIEW_RGB1, VK_COMPONENT_SWIZZLE_R,
-	                       VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B,
-	                       VK_COMPONENT_SWIZZLE_ONE);
-	CreateRenderTargetView(ctx, image, VulkanImage::VIEW_R000, VK_COMPONENT_SWIZZLE_R,
-	                       VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO,
-	                       VK_COMPONENT_SWIZZLE_ZERO);
-	CreateRenderTargetView(ctx, image, VulkanImage::VIEW_RG01, VK_COMPONENT_SWIZZLE_R,
-	                       VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_ZERO,
-	                       VK_COMPONENT_SWIZZLE_ONE);
-	CreateRenderTargetView(ctx, image, VulkanImage::VIEW_000R, VK_COMPONENT_SWIZZLE_ZERO,
-	                       VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO,
-	                       VK_COMPONENT_SWIZZLE_R);
 	if (image->layers > 1) {
 		CreateRenderTargetView(ctx, image, VulkanImage::VIEW_DEFAULT_ARRAY,
 		                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
 		                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
 		                       VK_IMAGE_VIEW_TYPE_2D_ARRAY);
-		CreateRenderTargetView(ctx, image, VulkanImage::VIEW_BGRA_ARRAY, VK_COMPONENT_SWIZZLE_B,
-		                       VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R,
-		                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
 	}
 	if (FormatSupportsStorage(ctx, image->format)) {
 		CreateRenderTargetView(ctx, image, VulkanImage::VIEW_STORAGE, VK_COMPONENT_SWIZZLE_IDENTITY,
@@ -926,13 +905,6 @@ void CreateRenderTargetViews(GraphicContext* ctx, RenderTextureVulkanImage* imag
 			                       VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_UNDEFINED, 0, 1);
 		}
 	}
-	const auto rgba_view_format = BgraToRgbaSampledViewFormat(image->format);
-	if (rgba_view_format != VK_FORMAT_UNDEFINED) {
-		CreateRenderTargetView(ctx, image, VulkanImage::VIEW_BGRA_TO_RGBA, VK_COMPONENT_SWIZZLE_B,
-		                       VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R,
-		                       VK_COMPONENT_SWIZZLE_A, VK_IMAGE_VIEW_TYPE_2D, rgba_view_format,
-		                       VK_IMAGE_USAGE_SAMPLED_BIT);
-	}
 	CreateRenderAttachmentViews(ctx, image);
 }
 
@@ -940,24 +912,12 @@ void CreateVideoOutViews(GraphicContext* ctx, VideoOutVulkanImage* image) {
 	CreateRenderTargetView(ctx, image, VulkanImage::VIEW_DEFAULT, VK_COMPONENT_SWIZZLE_IDENTITY,
 	                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
 	                       VK_COMPONENT_SWIZZLE_IDENTITY);
-	CreateRenderTargetView(ctx, image, VulkanImage::VIEW_BGRA, VK_COMPONENT_SWIZZLE_B,
-	                       VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R,
-	                       VK_COMPONENT_SWIZZLE_IDENTITY);
-	CreateRenderTargetView(ctx, image, VulkanImage::VIEW_DEFAULT_ARRAY,
-	                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-	                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-	                       VK_IMAGE_VIEW_TYPE_2D_ARRAY);
-	CreateRenderTargetView(ctx, image, VulkanImage::VIEW_BGRA_ARRAY, VK_COMPONENT_SWIZZLE_B,
-	                       VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R,
-	                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
-	if ((image->format == VK_FORMAT_R8G8B8A8_SRGB ||
-	     image->format == VK_FORMAT_B8G8R8A8_SRGB) &&
+	if ((image->format == VK_FORMAT_R8G8B8A8_SRGB || image->format == VK_FORMAT_B8G8R8A8_SRGB) &&
 	    FormatSupportsStorage(ctx, VK_FORMAT_R8G8B8A8_UINT)) {
-		CreateRenderTargetView(ctx, image, VulkanImage::VIEW_STORAGE,
+		CreateRenderTargetView(ctx, image, VulkanImage::VIEW_STORAGE, VK_COMPONENT_SWIZZLE_IDENTITY,
 		                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-		                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-		                       VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UINT,
-		                       VK_IMAGE_USAGE_STORAGE_BIT, 1);
+		                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_IMAGE_VIEW_TYPE_2D,
+		                       VK_FORMAT_R8G8B8A8_UINT, VK_IMAGE_USAGE_STORAGE_BIT, 1);
 	}
 }
 
@@ -1074,43 +1034,6 @@ void CreateDepthViews(GraphicContext* ctx, DepthStencilVulkanImage* image) {
 	                    {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
 	                     VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
 	                    0, 0, 1, 1);
-	UtilCreateImageView(ctx, image, VulkanImage::VIEW_DEPTH_TEXTURE, VK_IMAGE_VIEW_TYPE_2D,
-	                    VK_IMAGE_ASPECT_DEPTH_BIT,
-	                    {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R,
-	                     VK_COMPONENT_SWIZZLE_R},
-	                    0, 0, 1, 1);
-	UtilCreateImageView(ctx, image, VulkanImage::VIEW_R000, VK_IMAGE_VIEW_TYPE_2D,
-	                    VK_IMAGE_ASPECT_DEPTH_BIT,
-	                    {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ZERO,
-	                     VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO},
-	                    0, 0, 1, 1);
-	UtilCreateImageView(ctx, image, VulkanImage::VIEW_R001, VK_IMAGE_VIEW_TYPE_2D,
-	                    VK_IMAGE_ASPECT_DEPTH_BIT,
-	                    {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ZERO,
-	                     VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE},
-	                    0, 0, 1, 1);
-	if (image->layers > 1) {
-		UtilCreateImageView(ctx, image, VulkanImage::VIEW_DEFAULT_ARRAY,
-		                    VK_IMAGE_VIEW_TYPE_2D_ARRAY, DepthAspectMask(image->format),
-		                    {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-		                     VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
-		                    0, 0, image->layers, 1);
-		UtilCreateImageView(ctx, image, VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY,
-		                    VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_IMAGE_ASPECT_DEPTH_BIT,
-		                    {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R,
-		                     VK_COMPONENT_SWIZZLE_R},
-		                    0, 0, image->layers, 1);
-		UtilCreateImageView(ctx, image, VulkanImage::VIEW_R000_ARRAY, VK_IMAGE_VIEW_TYPE_2D_ARRAY,
-		                    VK_IMAGE_ASPECT_DEPTH_BIT,
-		                    {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ZERO,
-		                     VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO},
-		                    0, 0, image->layers, 1);
-		UtilCreateImageView(ctx, image, VulkanImage::VIEW_R001_ARRAY, VK_IMAGE_VIEW_TYPE_2D_ARRAY,
-		                    VK_IMAGE_ASPECT_DEPTH_BIT,
-		                    {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ZERO,
-		                     VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE},
-		                    0, 0, image->layers, 1);
-	}
 }
 
 DepthStencilVulkanImage* CreateDepthTarget(GraphicContext* ctx, const DepthTargetInfo& info,
@@ -1366,134 +1289,118 @@ VkImageView TextureCache::GetDepthTargetAttachmentView(GraphicContext*          
 	return view;
 }
 
-VkImageView TextureCache::GetRenderTargetSampledView(GraphicContext*           ctx,
-                                                     RenderTextureVulkanImage* image,
-                                                     VkFormat view_format, int variant,
-                                                     uint32_t base_level, uint32_t level_count,
-                                                     VkImageViewType type, uint32_t base_layer,
-                                                     uint32_t layer_count) {
-	if (ctx == nullptr || image == nullptr || image->image == nullptr || base_level >= 16 ||
-	    view_format == VK_FORMAT_UNDEFINED || level_count == 0 ||
-	    base_level + level_count > image->mip_levels || layer_count == 0 ||
-	    base_layer >= image->layers || layer_count > image->layers - base_layer ||
-	    (type != VK_IMAGE_VIEW_TYPE_2D && type != VK_IMAGE_VIEW_TYPE_2D_ARRAY) ||
-	    (type == VK_IMAGE_VIEW_TYPE_2D && layer_count != 1)) {
-		EXIT("TextureCache: invalid render-target sampled view, image=%p variant=%d"
-		     " view_format=%d mip=%u+%u layer=%u+%u type=%d image_levels=%u image_layers=%u\n",
-		     static_cast<const void*>(image), variant, static_cast<int>(view_format), base_level,
-		     level_count, base_layer, layer_count, static_cast<int>(type),
-		     image != nullptr ? image->mip_levels : 0, image != nullptr ? image->layers : 0);
-	}
-	const bool compatible_variant_format =
-	    view_format == image->format || (variant == VulkanImage::VIEW_BGRA_TO_RGBA &&
-	                                     IsBgraToRgbaSampledView(image->format, view_format)) ||
-	    (variant == VulkanImage::VIEW_DEFAULT &&
-	     (IsRgba16UintFloatReinterpretation(image->format, view_format) ||
-	      IsRgba8UnormUintReinterpretation(image->format, view_format)));
-	if (!compatible_variant_format) {
-		EXIT("TextureCache: incompatible render-target sampled view format, image_format=%d"
-		     " view_format=%d variant=%d\n",
-		     static_cast<int>(image->format), static_cast<int>(view_format), variant);
-	}
-	const auto default_view_format = variant == VulkanImage::VIEW_BGRA_TO_RGBA
-	                                     ? BgraToRgbaSampledViewFormat(image->format)
-	                                     : image->format;
-	int        default_variant     = variant;
-	if (type == VK_IMAGE_VIEW_TYPE_2D_ARRAY) {
-		switch (variant) {
-			case VulkanImage::VIEW_DEFAULT:
-				default_variant = VulkanImage::VIEW_DEFAULT_ARRAY;
-				break;
-			case VulkanImage::VIEW_BGRA: default_variant = VulkanImage::VIEW_BGRA_ARRAY; break;
-			default: default_variant = VulkanImage::VIEW_MAX; break;
-		}
-	}
-	const bool full_view =
-	    base_level == 0 && level_count == image->mip_levels && base_layer == 0 &&
-	    layer_count == (type == VK_IMAGE_VIEW_TYPE_2D_ARRAY ? image->layers : 1u);
-	if (view_format == default_view_format && full_view && default_variant >= 0 &&
-	    default_variant < VulkanImage::VIEW_MAX && image->image_view[default_variant] != nullptr) {
-		return image->image_view[default_variant];
+VkImageView TextureCache::GetImageView(GraphicContext* ctx, VulkanImage* image,
+                                       const ImageViewInfo& info) {
+	const bool supported_type = info.type == VK_IMAGE_VIEW_TYPE_2D ||
+	                            info.type == VK_IMAGE_VIEW_TYPE_2D_ARRAY ||
+	                            info.type == VK_IMAGE_VIEW_TYPE_3D;
+	const bool valid_shape =
+	    (info.type == VK_IMAGE_VIEW_TYPE_2D && info.layer_count == 1) ||
+	    info.type == VK_IMAGE_VIEW_TYPE_2D_ARRAY ||
+	    (info.type == VK_IMAGE_VIEW_TYPE_3D && info.base_layer == 0 && info.layer_count == 1);
+	if (ctx == nullptr || image == nullptr || image->image == nullptr ||
+	    info.format == VK_FORMAT_UNDEFINED || info.aspect == 0 || info.level_count == 0 ||
+	    info.base_level >= (image != nullptr ? image->mip_levels : 0) ||
+	    info.level_count > image->mip_levels - info.base_level || info.layer_count == 0 ||
+	    info.base_layer >= image->layers || info.layer_count > image->layers - info.base_layer ||
+	    !supported_type || !valid_shape) {
+		EXIT("TextureCache: invalid dynamic image view, image=%p format=%d aspect=0x%x"
+		     " swizzle=0x%03x mip=%u+%u layer=%u+%u type=%d storage=%d"
+		     " image_levels=%u image_layers=%u\n",
+		     static_cast<const void*>(image), static_cast<int>(info.format), info.aspect,
+		     info.swizzle, info.base_level, info.level_count, info.base_layer, info.layer_count,
+		     static_cast<int>(info.type), info.is_storage, image != nullptr ? image->mip_levels : 0,
+		     image != nullptr ? image->layers : 0);
 	}
 
-	std::lock_guard lock(image->sampled_view_mutex);
-	for (const auto& cached: image->sampled_views) {
-		if (cached.format == view_format && cached.type == type && cached.variant == variant &&
-		    cached.base_level == base_level && cached.level_count == level_count &&
-		    cached.base_layer == base_layer && cached.layer_count == layer_count) {
+	auto&           cache = image->view_cache;
+	std::lock_guard lock(cache.mutex);
+	for (const auto& cached: cache.views) {
+		if (cached.info == info) {
 			return cached.view;
 		}
 	}
 
-	VkComponentMapping components {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-	                               VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
-	switch (variant) {
-		case VulkanImage::VIEW_DEFAULT: break;
-		case VulkanImage::VIEW_BGRA:
-			components = {VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R,
-			              VK_COMPONENT_SWIZZLE_IDENTITY};
-			break;
-		case VulkanImage::VIEW_R001:
-			components = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ZERO,
-			              VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE};
-			break;
-		case VulkanImage::VIEW_RGB1:
-			components = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B,
-			              VK_COMPONENT_SWIZZLE_ONE};
-			break;
-		case VulkanImage::VIEW_R000:
-			components = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ZERO,
-			              VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO};
-			break;
-		case VulkanImage::VIEW_RG01:
-			components = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_ZERO,
-			              VK_COMPONENT_SWIZZLE_ONE};
-			break;
-		case VulkanImage::VIEW_000R:
-			components = {VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO,
-			              VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R};
-			break;
-		case VulkanImage::VIEW_BGRA_TO_RGBA:
-			if (!IsBgraToRgbaSampledView(image->format, view_format)) {
-				EXIT("TextureCache: incompatible mutable render-target sampled view\n");
-			}
-			components = {VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R,
-			              VK_COMPONENT_SWIZZLE_A};
-			break;
-		case VulkanImage::VIEW_ABGR:
-			components = {VK_COMPONENT_SWIZZLE_A, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_G,
-			              VK_COMPONENT_SWIZZLE_R};
-			break;
-		default:
-			EXIT("TextureCache: unsupported render-target sampled view variant: %d\n", variant);
-	}
-
-	VkImageViewCreateInfo      create {};
 	VkImageViewUsageCreateInfo usage {};
-	usage.sType                            = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
-	usage.usage                            = VK_IMAGE_USAGE_SAMPLED_BIT;
-	create.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create.pNext                           = &usage;
-	create.image                           = image->image;
-	create.viewType                        = type;
-	create.format                          = view_format;
-	create.components                      = components;
-	create.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create.subresourceRange.baseMipLevel   = base_level;
-	create.subresourceRange.levelCount     = level_count;
-	create.subresourceRange.baseArrayLayer = base_layer;
-	create.subresourceRange.layerCount     = layer_count;
+	usage.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
+	usage.usage = info.is_storage ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT;
+	VkImageViewCreateInfo create {};
+	create.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	create.pNext    = &usage;
+	create.image    = image->image;
+	create.viewType = info.type;
+	create.format   = info.format;
+	create.components =
+	    info.is_storage ? VkComponentMapping {} : TextureGetComponentMapping(info.swizzle);
+	create.subresourceRange.aspectMask     = info.aspect;
+	create.subresourceRange.baseMipLevel   = info.base_level;
+	create.subresourceRange.levelCount     = info.level_count;
+	create.subresourceRange.baseArrayLayer = info.base_layer;
+	create.subresourceRange.layerCount     = info.layer_count;
 	VkImageView view                       = nullptr;
 	const auto  result = vkCreateImageView(ctx->device, &create, nullptr, &view);
 	if (result != VK_SUCCESS || view == nullptr) {
-		EXIT("TextureCache: failed to create render-target sampled subresource view,"
-		     " result=%d view_format=%d variant=%d mip=%u+%u layer=%u+%u type=%d\n",
-		     static_cast<int>(result), static_cast<int>(view_format), variant, base_level,
-		     level_count, base_layer, layer_count, static_cast<int>(type));
+		EXIT("TextureCache: failed to create dynamic image view, result=%d format=%d"
+		     " aspect=0x%x swizzle=0x%03x mip=%u+%u layer=%u+%u type=%d storage=%d\n",
+		     static_cast<int>(result), static_cast<int>(info.format), info.aspect, info.swizzle,
+		     info.base_level, info.level_count, info.base_layer, info.layer_count,
+		     static_cast<int>(info.type), info.is_storage);
 	}
-	image->sampled_views.push_back(
-	    {view_format, type, base_level, level_count, base_layer, layer_count, variant, view});
+	cache.views.push_back({info, view});
 	return view;
+}
+
+VkImageView TextureCache::GetDepthTargetSampledView(GraphicContext*          ctx,
+                                                    DepthStencilVulkanImage* image,
+                                                    VkFormat view_format, uint32_t swizzle,
+                                                    uint32_t base_level, uint32_t level_count,
+                                                    VkImageViewType type, uint32_t base_layer,
+                                                    uint32_t layer_count) {
+	if (ctx == nullptr || image == nullptr || image->image == nullptr ||
+	    view_format == VK_FORMAT_UNDEFINED ||
+	    !IsSupportedSampledDepthView(image->format, view_format, swizzle)) {
+		EXIT("TextureCache: invalid sampled depth-target view, image=%p image_format=%d"
+		     " view_format=%d swizzle=0x%03x mip=%u+%u layer=%u+%u type=%d"
+		     " image_levels=%u image_layers=%u\n",
+		     static_cast<const void*>(image),
+		     image != nullptr ? static_cast<int>(image->format) : VK_FORMAT_UNDEFINED,
+		     static_cast<int>(view_format), swizzle, base_level, level_count, base_layer,
+		     layer_count, static_cast<int>(type), image != nullptr ? image->mip_levels : 0,
+		     image != nullptr ? image->layers : 0);
+	}
+	return GetImageView(ctx, image,
+	                    {image->format, type, VK_IMAGE_ASPECT_DEPTH_BIT, base_level, level_count,
+	                     base_layer, layer_count, swizzle});
+}
+
+VkImageView TextureCache::GetSampledColorView(GraphicContext* ctx, VulkanImage* image,
+	                                          VkFormat view_format, uint32_t swizzle,
+	                                          uint32_t base_level, uint32_t level_count,
+	                                          VkImageViewType type, uint32_t base_layer,
+	                                          uint32_t layer_count) {
+	if (ctx == nullptr || image == nullptr || image->image == nullptr ||
+	    view_format == VK_FORMAT_UNDEFINED || base_level >= 16 ||
+	    (type != VK_IMAGE_VIEW_TYPE_2D && type != VK_IMAGE_VIEW_TYPE_2D_ARRAY) ||
+	    !IsSupportedSampledColorView(image->format, view_format, swizzle)) {
+		EXIT("TextureCache: invalid sampled color view, image=%p swizzle=0x%03x"
+		     " view_format=%d mip=%u+%u layer=%u+%u type=%d image_levels=%u image_layers=%u\n",
+		     static_cast<const void*>(image), swizzle, static_cast<int>(view_format), base_level,
+		     level_count, base_layer, layer_count, static_cast<int>(type),
+		     image != nullptr ? image->mip_levels : 0, image != nullptr ? image->layers : 0);
+	}
+	const auto precreated_view = type == VK_IMAGE_VIEW_TYPE_2D_ARRAY
+	                                 ? VulkanImage::VIEW_DEFAULT_ARRAY
+	                                 : VulkanImage::VIEW_DEFAULT;
+	const bool full_view =
+	    base_level == 0 && level_count == image->mip_levels && base_layer == 0 &&
+	    layer_count == (type == VK_IMAGE_VIEW_TYPE_2D_ARRAY ? image->layers : 1u);
+	if (view_format == image->format && swizzle == DstSel(4, 5, 6, 7) && full_view &&
+	    image->image_view[precreated_view] != nullptr) {
+		return image->image_view[precreated_view];
+	}
+	return GetImageView(ctx, image,
+	                    {view_format, type, VK_IMAGE_ASPECT_COLOR_BIT, base_level, level_count,
+	                     base_layer, layer_count, swizzle});
 }
 
 VkImageView TextureCache::GetRenderTargetStorageView(GraphicContext*           ctx,
@@ -1502,11 +1409,8 @@ VkImageView TextureCache::GetRenderTargetStorageView(GraphicContext*           c
                                                      uint32_t level_count, VkImageViewType type,
                                                      uint32_t base_layer, uint32_t layer_count) {
 	if (ctx == nullptr || image == nullptr || image->image == nullptr ||
-	    view_format == VK_FORMAT_UNDEFINED || level_count == 0 ||
-	    base_level + level_count > image->mip_levels || layer_count == 0 ||
-	    base_layer >= image->layers || layer_count > image->layers - base_layer ||
-	    (type != VK_IMAGE_VIEW_TYPE_2D && type != VK_IMAGE_VIEW_TYPE_2D_ARRAY) ||
-	    (type == VK_IMAGE_VIEW_TYPE_2D && layer_count != 1)) {
+	    view_format == VK_FORMAT_UNDEFINED ||
+	    (type != VK_IMAGE_VIEW_TYPE_2D && type != VK_IMAGE_VIEW_TYPE_2D_ARRAY)) {
 		EXIT("TextureCache: invalid render-target storage view, image=%p view_format=%d"
 		     " mip=%u+%u layer=%u+%u type=%d image_levels=%u image_layers=%u\n",
 		     static_cast<const void*>(image), static_cast<int>(view_format), base_level,
@@ -1532,52 +1436,15 @@ VkImageView TextureCache::GetRenderTargetStorageView(GraphicContext*           c
 		}
 	}
 
-	std::lock_guard lock(image->storage_view_mutex);
-	for (const auto& cached: image->storage_views) {
-		if (cached.format == view_format && cached.type == type &&
-		    cached.base_level == base_level && cached.level_count == level_count &&
-		    cached.base_layer == base_layer && cached.layer_count == layer_count) {
-			return cached.view;
-		}
-	}
 	if (compatible && !FormatSupportsStorage(ctx, view_format)) {
 		EXIT("TextureCache: compatible render-target storage format lacks storage support,"
 		     " image_format=%d view_format=%d base=%u count=%u\n",
 		     static_cast<int>(image->format), static_cast<int>(view_format), base_level,
 		     level_count);
 	}
-
-	VkImageViewUsageCreateInfo usage {};
-	usage.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
-	usage.usage = VK_IMAGE_USAGE_STORAGE_BIT;
-	VkImageViewCreateInfo create {};
-	create.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create.pNext      = &usage;
-	create.image      = image->image;
-	create.viewType   = type;
-	create.format     = view_format;
-	create.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-	                     VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
-	create.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create.subresourceRange.baseMipLevel   = base_level;
-	create.subresourceRange.levelCount     = level_count;
-	create.subresourceRange.baseArrayLayer = base_layer;
-	create.subresourceRange.layerCount     = layer_count;
-	VkImageView view                       = nullptr;
-	const auto  result = vkCreateImageView(ctx->device, &create, nullptr, &view);
-	if (result != VK_SUCCESS || view == nullptr) {
-		EXIT("TextureCache: failed to create compatible render-target storage view,"
-		     " result=%d image_format=%d view_format=%d base=%u count=%u\n",
-		     static_cast<int>(result), static_cast<int>(image->format),
-		     static_cast<int>(view_format), base_level, level_count);
-	}
-	image->storage_views.push_back(
-	    {view_format, type, base_level, level_count, base_layer, layer_count, view});
-	LOGF("TextureCache: created compatible render-target storage view: image_format=%d"
-	     " view_format=%d base=%u count=%u extent=%ux%u\n",
-	     static_cast<int>(image->format), static_cast<int>(view_format), base_level, level_count,
-	     image->extent.width, image->extent.height);
-	return view;
+	return GetImageView(ctx, image,
+	                    {view_format, type, VK_IMAGE_ASPECT_COLOR_BIT, base_level, level_count,
+	                     base_layer, layer_count, DstSel(4, 5, 6, 7), true});
 }
 
 VkImageView TextureCache::GetStorageTextureSampledView(GraphicContext*            ctx,
@@ -1595,101 +1462,41 @@ VkImageView TextureCache::GetStorageTextureSampledView(GraphicContext*          
 		     info.view_levels, image != nullptr ? image->mip_levels : 0, info.base_array);
 	}
 	const auto view_format = TextureGetFormat(info.format, TextureFormatUsage::Sampled);
-	if (view_format != image->format &&
-	    !IsRgba8SrgbReinterpretation(image->format, view_format) &&
+	if (view_format != image->format && !IsRgba8SrgbReinterpretation(image->format, view_format) &&
 	    !IsR32UintFloatReinterpretation(image->format, view_format)) {
 		EXIT("TextureCache: incompatible sampled view of storage texture, image_format=%d"
 		     " view_format=%d swizzle=0x%03x\n",
 		     static_cast<int>(image->format), static_cast<int>(view_format), info.swizzle);
 	}
 
-	std::lock_guard lock(image->sampled_view_mutex);
-	for (const auto& cached: image->sampled_views) {
-		if (cached.format == view_format && cached.swizzle == info.swizzle &&
-		    cached.type == info.type && cached.base_level == info.base_level &&
-		    cached.level_count == info.view_levels) {
-			return cached.view;
-		}
-	}
-
-	VkImageViewUsageCreateInfo usage {};
-	usage.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
-	usage.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
-	VkImageViewCreateInfo create {};
-	create.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create.pNext    = &usage;
-	create.image    = image->image;
+	VkImageViewType type = VK_IMAGE_VIEW_TYPE_MAX_ENUM;
 	switch (shape) {
-		case StorageSampledViewShape::Image2D: create.viewType = VK_IMAGE_VIEW_TYPE_2D; break;
-		case StorageSampledViewShape::Image2DArray:
-			create.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-			break;
-		case StorageSampledViewShape::Image3D: create.viewType = VK_IMAGE_VIEW_TYPE_3D; break;
+		case StorageSampledViewShape::Image2D: type = VK_IMAGE_VIEW_TYPE_2D; break;
+		case StorageSampledViewShape::Image2DArray: type = VK_IMAGE_VIEW_TYPE_2D_ARRAY; break;
+		case StorageSampledViewShape::Image3D: type = VK_IMAGE_VIEW_TYPE_3D; break;
 		case StorageSampledViewShape::Unsupported:
 			EXIT("TextureCache: unsupported sampled storage-image view shape\n");
 	}
-	create.format   = view_format;
-	create.components                      = TextureGetComponentMapping(info.swizzle);
-	create.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create.subresourceRange.baseMipLevel   = info.base_level;
-	create.subresourceRange.levelCount     = info.view_levels;
-	create.subresourceRange.baseArrayLayer = 0;
-	create.subresourceRange.layerCount =
-	    shape == StorageSampledViewShape::Image2DArray ? info.depth : 1;
-	VkImageView view   = nullptr;
-	const auto  result = vkCreateImageView(ctx->device, &create, nullptr, &view);
-	if (result != VK_SUCCESS || view == nullptr) {
-		EXIT("TextureCache: failed to create sampled view of storage texture, result=%d"
-		     " image_format=%d view_format=%d swizzle=0x%03x type=%u base=%u count=%u\n",
-		     static_cast<int>(result), static_cast<int>(image->format),
-		     static_cast<int>(view_format), info.swizzle, info.type, info.base_level,
-		     info.view_levels);
-	}
-	image->sampled_views.push_back(
-	    {view_format, info.swizzle, info.type, info.base_level, info.view_levels, view});
-	LOGF("TextureCache: created sampled view of storage texture: image_format=%d"
-	     " view_format=%d swizzle=0x%03x type=%u base=%u count=%u\n",
-	     static_cast<int>(image->format), static_cast<int>(view_format), info.swizzle, info.type,
-	     info.base_level, info.view_levels);
-	return view;
+	const auto layer_count = shape == StorageSampledViewShape::Image2DArray ? info.depth : 1u;
+	return GetImageView(ctx, image,
+	                    {view_format, type, VK_IMAGE_ASPECT_COLOR_BIT, info.base_level,
+	                     info.view_levels, 0, layer_count, info.swizzle});
 }
 
-VkImageView TextureCache::GetStorageTextureStorageView(GraphicContext* ctx,
-	                                                     StorageTextureVulkanImage* image,
-	                                                     uint32_t base_level) {
-	if (base_level >= image->mip_levels) {
+VkImageView TextureCache::GetStorageTextureStorageView(GraphicContext*            ctx,
+                                                       StorageTextureVulkanImage* image,
+                                                       uint32_t                   base_level) {
+	if (ctx == nullptr || image == nullptr || image->image == nullptr ||
+	    base_level >= (image != nullptr ? image->mip_levels : 0)) {
 		EXIT("TextureCache: invalid storage-texture mip view, image=%p level=%u levels=%u\n",
 		     static_cast<const void*>(image), base_level, image != nullptr ? image->mip_levels : 0);
 	}
 	if (base_level == 0) {
 		return image->image_view[VulkanImage::VIEW_DEFAULT];
 	}
-	std::lock_guard lock(image->storage_view_mutex);
-	for (const auto& cached: image->storage_views) {
-		if (cached.base_level == base_level) {
-			return cached.view;
-		}
-	}
-	VkImageViewCreateInfo create {};
-	create.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	create.image                           = image->image;
-	create.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-	create.format                          = image->format;
-	create.components                      = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-	                                          VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
-	create.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-	create.subresourceRange.baseMipLevel   = base_level;
-	create.subresourceRange.levelCount     = 1;
-	create.subresourceRange.baseArrayLayer = 0;
-	create.subresourceRange.layerCount     = 1;
-	VkImageView view = nullptr;
-	const auto result = vkCreateImageView(ctx->device, &create, nullptr, &view);
-	if (result != VK_SUCCESS || view == nullptr) {
-		EXIT("TextureCache: failed to create storage-texture mip view, result=%d level=%u\n",
-		     static_cast<int>(result), base_level);
-	}
-	image->storage_views.push_back({base_level, view});
-	return view;
+	return GetImageView(ctx, image,
+	                    {image->format, VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT,
+	                     base_level, 1, 0, 1, DstSel(4, 5, 6, 7), true});
 }
 
 TextureCache::CachedImage* TextureCache::FindGpuReadbackPageCandidateLocked(uint64_t vaddr,
@@ -4295,6 +4102,13 @@ void TextureCache::DeleteImageViews(GraphicContext* ctx, VulkanImage* image) {
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(image == nullptr);
 
+	for (auto& cached: image->view_cache.views) {
+		if (cached.view != nullptr) {
+			vkDestroyImageView(ctx->device, cached.view, nullptr);
+			cached.view = nullptr;
+		}
+	}
+	image->view_cache.views.clear();
 	for (auto& view: image->image_view) {
 		if (view != nullptr) {
 			vkDestroyImageView(ctx->device, view, nullptr);
@@ -4310,23 +4124,6 @@ void TextureCache::DeleteGpuTexture(GraphicContext* ctx, GpuTextureVulkanImage* 
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(image == nullptr);
 
-	if (image->type == VulkanImageType::StorageTexture) {
-		auto* storage = static_cast<StorageTextureVulkanImage*>(image);
-		for (auto& cached: storage->sampled_views) {
-			if (cached.view != nullptr) {
-				vkDestroyImageView(ctx->device, cached.view, nullptr);
-				cached.view = nullptr;
-			}
-		}
-		storage->sampled_views.clear();
-		for (auto& cached: storage->storage_views) {
-			if (cached.view != nullptr) {
-				vkDestroyImageView(ctx->device, cached.view, nullptr);
-				cached.view = nullptr;
-			}
-		}
-		storage->storage_views.clear();
-	}
 	DeleteImageViews(ctx, image);
 	VulkanDeleteImage(ctx, image, mem);
 
@@ -4360,20 +4157,6 @@ void TextureCache::DeleteRenderTexture(GraphicContext* ctx, RenderTextureVulkanI
 		}
 	}
 	image->attachment_views.clear();
-	for (auto& cached: image->sampled_views) {
-		if (cached.view != nullptr) {
-			vkDestroyImageView(ctx->device, cached.view, nullptr);
-			cached.view = nullptr;
-		}
-	}
-	image->sampled_views.clear();
-	for (auto& cached: image->storage_views) {
-		if (cached.view != nullptr) {
-			vkDestroyImageView(ctx->device, cached.view, nullptr);
-			cached.view = nullptr;
-		}
-	}
-	image->storage_views.clear();
 	DeleteImageViews(ctx, image);
 	VulkanDeleteImage(ctx, image, mem);
 	delete image;

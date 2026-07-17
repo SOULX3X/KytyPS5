@@ -154,8 +154,9 @@ static void ConfigurePreparedFrame(PreparedFrame* frame, VkExtent2D extent, VkFo
 		return;
 	}
 	if (dst.image != nullptr) {
+		EXIT_IF(!dst.view_cache.views.empty());
 		VulkanDeleteImage(ctx, &dst, &dst.memory);
-		dst = VulkanImage(VulkanImageType::Unknown);
+		dst.memory = {};
 	}
 
 	dst.extent          = extent;

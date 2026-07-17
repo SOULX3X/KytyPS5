@@ -20,6 +20,7 @@ namespace Libs::Graphics {
 struct DepthStencilVulkanImage;
 struct GpuTextureVulkanImage;
 struct GraphicContext;
+struct ImageViewInfo;
 struct RenderTextureVulkanImage;
 struct StorageTextureVulkanImage;
 struct VideoOutVulkanImage;
@@ -69,12 +70,17 @@ public:
 	                                                       DepthStencilVulkanImage* image,
 	                                                       uint32_t                 base_layer,
 	                                                       uint32_t                 layer_count);
-	[[nodiscard]] VkImageView GetRenderTargetSampledView(GraphicContext*           ctx,
-	                                                     RenderTextureVulkanImage* image,
-	                                                     VkFormat view_format, int variant,
-	                                                     uint32_t base_level, uint32_t level_count,
-	                                                     VkImageViewType type, uint32_t base_layer,
-	                                                     uint32_t layer_count);
+	[[nodiscard]] VkImageView GetDepthTargetSampledView(GraphicContext*          ctx,
+	                                                    DepthStencilVulkanImage* image,
+	                                                    VkFormat view_format, uint32_t swizzle,
+	                                                    uint32_t base_level, uint32_t level_count,
+	                                                    VkImageViewType type, uint32_t base_layer,
+	                                                    uint32_t layer_count);
+	[[nodiscard]] VkImageView GetSampledColorView(GraphicContext* ctx, VulkanImage* image,
+	                                              VkFormat view_format, uint32_t swizzle,
+	                                              uint32_t base_level, uint32_t level_count,
+	                                              VkImageViewType type, uint32_t base_layer,
+	                                              uint32_t layer_count);
 	[[nodiscard]] VkImageView GetRenderTargetStorageView(GraphicContext*           ctx,
 	                                                     RenderTextureVulkanImage* image,
 	                                                     VkFormat view_format, uint32_t base_level,
@@ -83,13 +89,13 @@ public:
 	[[nodiscard]] VkImageView GetStorageTextureSampledView(GraphicContext*            ctx,
 	                                                       StorageTextureVulkanImage* image,
 	                                                       const ImageInfo&           info);
-	[[nodiscard]] VkImageView GetStorageTextureStorageView(GraphicContext* ctx,
+	[[nodiscard]] VkImageView GetStorageTextureStorageView(GraphicContext*            ctx,
 	                                                       StorageTextureVulkanImage* image,
-	                                                       uint32_t base_level);
-	[[nodiscard]] DepthStencilVulkanImage* FindDepthTargetByRange(uint64_t vaddr, uint64_t size,
-	                                                            bool allow_containing_sampled = false);
-	[[nodiscard]] bool                     HasPageOverlap(uint64_t vaddr, uint64_t size);
-	[[nodiscard]] bool                     HasRangeOverlap(uint64_t vaddr, uint64_t size);
+	                                                       uint32_t                   base_level);
+	[[nodiscard]] DepthStencilVulkanImage*
+	FindDepthTargetByRange(uint64_t vaddr, uint64_t size, bool allow_containing_sampled = false);
+	[[nodiscard]] bool HasPageOverlap(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool HasRangeOverlap(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool HasGpuModifiedRangeOverlap(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool HasGpuTargetPageOverlap(uint64_t vaddr, uint64_t size);
 	void               RegisterMeta(uint64_t vaddr, uint64_t size, uint32_t layers = 1);
@@ -126,6 +132,8 @@ private:
 		bool     gpu_modified = false;
 	};
 	static void                DeleteImageViews(GraphicContext* ctx, VulkanImage* image);
+	[[nodiscard]] VkImageView  GetImageView(GraphicContext* ctx, VulkanImage* image,
+	                                        const ImageViewInfo& info);
 	[[nodiscard]] bool         HasMetaOverlapLocked(uint64_t vaddr, uint64_t size) const;
 	[[nodiscard]] CachedImage* FindGpuReadbackPageCandidateLocked(uint64_t vaddr,
 	                                                              uint64_t size) const;

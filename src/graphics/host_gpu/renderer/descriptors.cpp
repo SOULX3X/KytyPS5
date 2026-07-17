@@ -84,14 +84,6 @@ static int SampledArrayViewIndex(const VulkanImage* image, int view_index) {
 
 	switch (view_index) {
 		case VulkanImage::VIEW_DEFAULT: return VulkanImage::VIEW_DEFAULT_ARRAY;
-		case VulkanImage::VIEW_BGRA: return VulkanImage::VIEW_BGRA_ARRAY;
-		case VulkanImage::VIEW_DEPTH_TEXTURE: return VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY;
-		case VulkanImage::VIEW_STENCIL_TEXTURE: return VulkanImage::VIEW_STENCIL_TEXTURE_ARRAY;
-		case VulkanImage::VIEW_R001: return VulkanImage::VIEW_R001_ARRAY;
-		case VulkanImage::VIEW_RGB1: return VulkanImage::VIEW_RGB1_ARRAY;
-		case VulkanImage::VIEW_R000: return VulkanImage::VIEW_R000_ARRAY;
-		case VulkanImage::VIEW_RG01: return VulkanImage::VIEW_RG01_ARRAY;
-		case VulkanImage::VIEW_000R: return VulkanImage::VIEW_000R_ARRAY;
 		default: return view_index;
 	}
 }
@@ -332,6 +324,16 @@ ResolveTargetTextureView(const ShaderRecompiler::IR::ImageResource& resource,
 			           : TargetTextureViewInfo {};
 		default: return {};
 	}
+}
+
+bool IsSupportedSampledVideoOutView(const ShaderRecompiler::IR::ImageResource& resource,
+                                    const ShaderTextureResource&               descriptor,
+                                    const VulkanImage&                         image) {
+	return image.type == VulkanImageType::VideoOut && image.layers == 1 &&
+	       IsSupportedSampledColorResource(resource) &&
+	       resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2D &&
+	       descriptor.Type() == Prospero::GpuEnumValue(Prospero::ImageType::kColor2D) &&
+	       descriptor.Depth() == 0 && descriptor.BaseArray5() == 0;
 }
 
 bool IsSupportedDepthTargetDescriptor(const ShaderTextureResource& descriptor,
@@ -588,7 +590,9 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 					image = nullptr;
 				} else {
 					ValidateDepthTargetBinding(resource, descriptor, image, view_format, size.size);
-					view = SelectSampledDepthView(image->format, view_format, swizzle);
+					image_view = g_render_ctx->GetTextureCache()->GetDepthTargetSampledView(
+					    g_render_ctx->GetGraphicCtx(), static_cast<DepthStencilVulkanImage*>(image),
+					    view_format, swizzle, 0, 1, VK_IMAGE_VIEW_TYPE_2D, 0, 1);
 				}
 			} else {
 				if (!(storage ? IsSupportedStorageImageResource(resource)
@@ -611,19 +615,17 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 					     image->mip_levels, base_level, descriptor.BaseArray5(),
 					     static_cast<uint32_t>(type));
 				}
-				view = storage ? SelectStorageColorView(image->format, view_format, swizzle)
-				               : SelectSampledColorView(image->format, view_format, swizzle);
 				if (storage) {
+					view       = SelectStorageColorView(image->format, view_format, swizzle);
 					image_view = g_render_ctx->GetTextureCache()->GetRenderTargetStorageView(
 					    g_render_ctx->GetGraphicCtx(),
 					    static_cast<RenderTextureVulkanImage*>(image), view_format, base_level,
 					    view_levels, target_view.type, target_view.base_layer,
 					    target_view.layer_count);
 				} else {
-					image_view = g_render_ctx->GetTextureCache()->GetRenderTargetSampledView(
-					    g_render_ctx->GetGraphicCtx(),
-					    static_cast<RenderTextureVulkanImage*>(image), view_format, view,
-					    base_level, view_levels, target_view.type, target_view.base_layer,
+					image_view = g_render_ctx->GetTextureCache()->GetSampledColorView(
+					    g_render_ctx->GetGraphicCtx(), image, view_format, swizzle, base_level,
+					    view_levels, target_view.type, target_view.base_layer,
 					    target_view.layer_count);
 				}
 			}
@@ -661,10 +663,27 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 				view  = VulkanImage::VIEW_STORAGE;
 				g_render_ctx->GetTextureCache()->MarkGpuWritten(image);
 			} else {
-				image = video.image;
-				if (swizzle == DstSel(6, 5, 4, 7)) {
-					view = VulkanImage::VIEW_BGRA;
+				const bool exact =
+				    IsSupportedSampledVideoOutView(resource, descriptor, *video.image) &&
+				    width == video.image->extent.width && height == video.image->extent.height &&
+				    levels == 1 && base_level == 0 && view_levels == 1 && video.size == size.size &&
+				    video.pitch == pitch;
+				if (!exact) {
+					EXIT("unsupported sampled access to video-out surface: resource=%u dimension=%u"
+					     " image_format=%d view_format=%d swizzle=0x%03x extent=%ux%u/%ux%u"
+					     " depth=%u levels=%u base=%u count=%u type=%u size=0x%016" PRIx64
+					     "/0x%016" PRIx64 " pitch=%u/%u\n",
+					     static_cast<uint32_t>(resource.kind),
+					     static_cast<uint32_t>(resource.dimension),
+					     static_cast<int>(video.image->format), static_cast<int>(view_format),
+					     swizzle, width, height, video.image->extent.width,
+					     video.image->extent.height, depth, levels, base_level, view_levels,
+					     static_cast<uint32_t>(type), size.size, video.size, pitch, video.pitch);
 				}
+				image      = video.image;
+				image_view = g_render_ctx->GetTextureCache()->GetSampledColorView(
+				    g_render_ctx->GetGraphicCtx(), video.image, view_format, swizzle, 0, 1,
+				    VK_IMAGE_VIEW_TYPE_2D, 0, 1);
 			}
 		}
 	}

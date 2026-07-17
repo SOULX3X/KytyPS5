@@ -12,6 +12,9 @@ struct VulkanImage;
 
 [[nodiscard]] bool IsSupportedDepthTargetDescriptor(const ShaderTextureResource& descriptor,
                                                     const VulkanImage&           image);
+[[nodiscard]] bool
+IsSupportedSampledVideoOutView(const ShaderRecompiler::IR::ImageResource& resource,
+                               const ShaderTextureResource& descriptor, const VulkanImage& image);
 void ValidateMetadataReuseTexture(const ShaderRecompiler::IR::ImageResource& resource,
                                   const ShaderTextureResource& descriptor, uint64_t size);
 void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
