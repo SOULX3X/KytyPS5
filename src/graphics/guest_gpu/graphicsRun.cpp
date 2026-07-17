@@ -659,15 +659,21 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	const uint32_t write_confirm = (write_control >> 20u) & 0x1u;
 
 	if (dst_sel != 0 && dst_sel != 2 && dst_sel != 4 && dst_sel != 5) {
-		LOGF("\t warning: unexpected write_data dst_sel %" PRIu32 "\n", dst_sel);
+		EXIT("unsupported writeData destination selector 0x%02" PRIx32 "\n", dst_sel);
 	}
 	EXIT_NOT_IMPLEMENTED(increment != 0);
 
 	if (cache_policy > 3 || write_confirm > 1) {
 		LOGF("\t warning: unexpected write_data control 0x%08" PRIx32 "\n", write_control);
 	}
+	if (dw_num == 0) {
+		return;
+	}
 
-	memcpy(dst, src, static_cast<size_t>(dw_num) * 4);
+	const auto size = static_cast<uint64_t>(dw_num) * sizeof(uint32_t);
+	CommandProcessorGuestAccessScope guest_access(CommandProcessorGuestAccess::DirectFence,
+	                                              reinterpret_cast<uint64_t>(dst), size);
+	memcpy(dst, src, static_cast<size_t>(size));
 }
 
 void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_bytes) {
