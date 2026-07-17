@@ -3,29 +3,21 @@ name: Build KytyPS5
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
+    branches: [ main, master ]
   pull_request:
 
 jobs:
   build:
     runs-on: windows-2022
 
-    env:
-      BUILD_TYPE: Release
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
 
-      - name: Setup Visual Studio Environment
+      - name: Setup Visual Studio environment
         uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
 
       - name: Setup Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
@@ -39,54 +31,55 @@ jobs:
           arch: win64_msvc2022_64
           cache: true
 
-      - name: Install Vulkan SDK 1.4.335.0
-        uses: humbletim/install-vulkan-sdk@v1.2
-        with:
-          version: 1.4.335.0
-          cache: true
+      - name: Install Vulkan SDK
+        shell: powershell
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://sdk.lunarg.com/sdk/download/1.4.335.0/windows/vulkansdk-windows-X64-1.4.335.0.exe" `
+            -OutFile VulkanSDK.exe
+          Start-Process .\VulkanSDK.exe `
+            -ArgumentList "--accept-licenses --default-answer --confirm-command install" `
+            -Wait
 
-      - name: Verify Environment
+      - name: Locate Vulkan SDK
+        shell: powershell
+        run: |
+          $sdk = Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          echo "VULKAN_SDK=$($sdk.FullName)" >> $env:GITHUB_ENV
+
+      - name: Verify toolchain
         shell: cmd
         run: |
-          echo ===== CLANG =====
-          where clang-cl
-          clang-cl --version
-
-          echo ===== NINJA =====
-          ninja --version
-
-          echo ===== CMAKE =====
+          git --version
           cmake --version
-
-          echo ===== QT =====
+          ninja --version
+          clang-cl --version
           echo Qt6_DIR=%Qt6_DIR%
-
-          echo ===== VULKAN =====
-          echo %VULKAN_SDK%
+          echo VULKAN_SDK=%VULKAN_SDK%
 
       - name: Configure
         shell: cmd
         run: |
-          cmake ^
-            -S src ^
-            -B build ^
+          cmake -S src -B _Build/windows ^
             -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_C_COMPILER=clang-cl ^
-            -DCMAKE_CXX_COMPILER=clang-cl
+            -DCMAKE_CXX_COMPILER=clang-cl ^
+            -DCMAKE_PREFIX_PATH="%Qt6_DIR%" ^
+            -DVULKAN_SDK="%VULKAN_SDK%"
 
       - name: Build
         shell: cmd
         run: |
-          cmake --build build --target launcher --parallel
+          cmake --build _Build/windows --target launcher --parallel
 
       - name: Install
         shell: cmd
         run: |
-          cmake --install build --prefix build/install
+          cmake --install _Build/windows --prefix _Build/windows/install
 
-      - name: Upload Artifact
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: KytyPS5-Windows
-          path: build/install
+          name: KytyPS5
+          path: _Build/windows/install/**
