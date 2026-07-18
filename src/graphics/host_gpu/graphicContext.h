@@ -19,16 +19,16 @@ class CommandBuffer;
 struct VulkanSwapchain {
 	~VulkanSwapchain();
 
-	VkSwapchainKHR                              swapchain        = nullptr;
-	VkFormat                                    swapchain_format = VK_FORMAT_UNDEFINED;
-	VkExtent2D                                  swapchain_extent = {};
-	std::unique_ptr<VkImage[]>                  swapchain_images;
-	std::unique_ptr<VkImageView[]>              swapchain_image_views;
-	uint32_t                                    swapchain_images_count = 0;
-	std::unique_ptr<VkSemaphore[]>              image_acquired_semaphores;
-	std::unique_ptr<VkSemaphore[]>              render_complete_semaphores;
-	uint32_t                                    current_index = 0;
-	uint32_t                                    present_frame = 0;
+	VkSwapchainKHR                 swapchain        = nullptr;
+	VkFormat                       swapchain_format = VK_FORMAT_UNDEFINED;
+	VkExtent2D                     swapchain_extent = {};
+	std::unique_ptr<VkImage[]>     swapchain_images;
+	std::unique_ptr<VkImageView[]> swapchain_image_views;
+	uint32_t                       swapchain_images_count = 0;
+	std::unique_ptr<VkSemaphore[]> image_acquired_semaphores;
+	std::unique_ptr<VkSemaphore[]> render_complete_semaphores;
+	uint32_t                       current_index = 0;
+	uint32_t                       present_frame = 0;
 };
 
 struct VulkanCommandPool {
@@ -66,32 +66,42 @@ enum class VulkanImageType {
 	RenderTexture
 };
 
+struct ImageViewInfo {
+	VkFormat           format      = VK_FORMAT_UNDEFINED;
+	VkImageViewType    type        = VK_IMAGE_VIEW_TYPE_2D;
+	VkImageAspectFlags aspect      = 0;
+	uint32_t           base_level  = 0;
+	uint32_t           level_count = 0;
+	uint32_t           base_layer  = 0;
+	uint32_t           layer_count = 1;
+	uint32_t           swizzle     = 0;
+	VkImageUsageFlags  usage       = VK_IMAGE_USAGE_SAMPLED_BIT;
+
+	bool operator==(const ImageViewInfo&) const = default;
+};
+
+struct CachedImageView {
+	ImageViewInfo info;
+	VkImageView   view = nullptr;
+};
+
+struct ImageViewCache {
+	std::mutex                   mutex;
+	std::vector<CachedImageView> views;
+
+	ImageViewCache() = default;
+	KYTY_CLASS_NO_COPY(ImageViewCache);
+};
+
 struct VulkanImage {
-	static constexpr int VIEW_MAX                   = 22;
-	static constexpr int VIEW_DEFAULT               = 0;
-	static constexpr int VIEW_BGRA                  = 1;
-	static constexpr int VIEW_DEPTH_TEXTURE         = 2;
-	static constexpr int VIEW_R001                  = 3;
-	static constexpr int VIEW_RGB1                  = 4;
-	static constexpr int VIEW_R000                  = 5;
-	static constexpr int VIEW_RG01                  = 6;
-	static constexpr int VIEW_000R                  = 7;
-	static constexpr int VIEW_DEFAULT_ARRAY         = 8;
-	static constexpr int VIEW_BGRA_ARRAY            = 9;
-	static constexpr int VIEW_DEPTH_TEXTURE_ARRAY   = 10;
-	static constexpr int VIEW_R001_ARRAY            = 11;
-	static constexpr int VIEW_RGB1_ARRAY            = 12;
-	static constexpr int VIEW_R000_ARRAY            = 13;
-	static constexpr int VIEW_RG01_ARRAY            = 14;
-	static constexpr int VIEW_000R_ARRAY            = 15;
-	static constexpr int VIEW_STENCIL_TEXTURE       = 16;
-	static constexpr int VIEW_STENCIL_TEXTURE_ARRAY = 17;
-	static constexpr int VIEW_STORAGE               = 18;
-	static constexpr int VIEW_STORAGE_ARRAY         = 19;
-	static constexpr int VIEW_BGRA_TO_RGBA          = 20;
-	static constexpr int VIEW_ABGR                  = 21;
+	static constexpr int VIEW_MAX           = 4;
+	static constexpr int VIEW_DEFAULT       = 0;
+	static constexpr int VIEW_DEFAULT_ARRAY = 1;
+	static constexpr int VIEW_STORAGE       = 2;
+	static constexpr int VIEW_STORAGE_ARRAY = 3;
 
 	explicit VulkanImage(VulkanImageType type): type(type) {}
+	KYTY_CLASS_NO_COPY(VulkanImage);
 
 	VulkanImageType        type                 = VulkanImageType::Unknown;
 	VkFormat               format               = VK_FORMAT_UNDEFINED;
@@ -103,6 +113,7 @@ struct VulkanImage {
 	VkImageView            image_view[VIEW_MAX] = {};
 	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
 	Graphics::VulkanMemory memory;
+	ImageViewCache         view_cache;
 };
 
 struct VideoOutVulkanImage: public VulkanImage {
@@ -110,15 +121,8 @@ struct VideoOutVulkanImage: public VulkanImage {
 };
 
 struct DepthStencilVulkanImage: public VulkanImage {
-	struct AttachmentView {
-		uint32_t    base_layer  = 0;
-		uint32_t    layer_count = 1;
-		VkImageView view        = nullptr;
-	};
 	DepthStencilVulkanImage(): VulkanImage(VulkanImageType::DepthStencil) {}
-	bool                        compressed = false;
-	std::mutex                  attachment_view_mutex;
-	std::vector<AttachmentView> attachment_views;
+	bool compressed = false;
 };
 
 struct GpuTextureVulkanImage: public VulkanImage {
@@ -130,60 +134,11 @@ struct TextureVulkanImage: public GpuTextureVulkanImage {
 };
 
 struct StorageTextureVulkanImage: public GpuTextureVulkanImage {
-	struct StorageView {
-		uint32_t    base_level = 0;
-		VkImageView view       = nullptr;
-	};
-	struct SampledView {
-		VkFormat    format      = VK_FORMAT_UNDEFINED;
-		uint32_t    swizzle     = 0;
-		uint32_t    type        = 0;
-		uint32_t    base_level  = 0;
-		uint32_t    level_count = 0;
-		VkImageView view        = nullptr;
-	};
 	StorageTextureVulkanImage(): GpuTextureVulkanImage(VulkanImageType::StorageTexture) {}
-	std::mutex               sampled_view_mutex;
-	std::vector<SampledView> sampled_views;
-	std::mutex               storage_view_mutex;
-	std::vector<StorageView> storage_views;
 };
 
 struct RenderTextureVulkanImage: public VulkanImage {
-	struct AttachmentView {
-		VkFormat    format      = VK_FORMAT_UNDEFINED;
-		uint32_t    level       = 0;
-		uint32_t    base_layer  = 0;
-		uint32_t    layer_count = 1;
-		VkImageView view        = nullptr;
-	};
-	struct SampledView {
-		VkFormat        format      = VK_FORMAT_UNDEFINED;
-		VkImageViewType type        = VK_IMAGE_VIEW_TYPE_2D;
-		uint32_t        base_level  = 0;
-		uint32_t        level_count = 0;
-		uint32_t        base_layer  = 0;
-		uint32_t        layer_count = 1;
-		int             variant     = VIEW_DEFAULT;
-		VkImageView     view        = nullptr;
-	};
-	struct StorageView {
-		VkFormat        format      = VK_FORMAT_UNDEFINED;
-		VkImageViewType type        = VK_IMAGE_VIEW_TYPE_2D;
-		uint32_t        base_level  = 0;
-		uint32_t        level_count = 0;
-		uint32_t        base_layer  = 0;
-		uint32_t        layer_count = 1;
-		VkImageView     view        = nullptr;
-	};
 	RenderTextureVulkanImage(): VulkanImage(VulkanImageType::RenderTexture) {}
-	VkImageView                 render_view[16] = {};
-	std::mutex                  attachment_view_mutex;
-	std::vector<AttachmentView> attachment_views;
-	std::mutex                  sampled_view_mutex;
-	std::vector<SampledView>    sampled_views;
-	std::mutex                  storage_view_mutex;
-	std::vector<StorageView>    storage_views;
 };
 
 struct VulkanBuffer {

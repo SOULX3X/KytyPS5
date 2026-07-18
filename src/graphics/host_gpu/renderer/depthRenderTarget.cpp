@@ -129,10 +129,9 @@ void ResolveRenderDepthTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 	    // DB_DEPTH_SIZE_XY is independent state and may remain programmed after the attachment
 	    // formats and addresses are unbound. A zero encoding is the valid 1x1 value, so its
 	    // presence alone must not manufacture a depth attachment.
-	    !z.z_info.tile_surface_enable && !z.width_height_valid &&
-	    !z.pitch_height_valid && z.size.x_max == 0 && z.size.y_max == 0 &&
-	    z.pitch_div8_minus1 == 0 && z.height_div8_minus1 == 0 && z.slice_div64_minus1 == 0 &&
-	    z.width == 0 && z.height == 0;
+	    !z.z_info.tile_surface_enable && !z.width_height_valid && !z.pitch_height_valid &&
+	    z.size.x_max == 0 && z.size.y_max == 0 && z.pitch_div8_minus1 == 0 &&
+	    z.height_div8_minus1 == 0 && z.slice_div64_minus1 == 0 && z.width == 0 && z.height == 0;
 	if (attachment_unbound) {
 		static std::atomic_bool logged = false;
 		if (!logged.exchange(true, std::memory_order_relaxed)) {

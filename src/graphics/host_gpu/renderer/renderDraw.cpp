@@ -1,3 +1,5 @@
+#include "graphics/host_gpu/renderer/renderDraw.h"
+
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
@@ -20,7 +22,6 @@
 #include "graphics/host_gpu/renderer/pipelineCache.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
-#include "graphics/host_gpu/renderer/renderDraw.h"
 #include "graphics/host_gpu/renderer/renderInternal.h"
 #include "graphics/host_gpu/renderer/renderVertex.h"
 #include "graphics/host_gpu/renderer/shaderResourceBarrier.h"
@@ -823,9 +824,9 @@ static void BindDrawIndexBuffer(CommandBuffer* buffer, VkCommandBuffer vk_buffer
 	VkDeviceSize  index_offset = 0;
 	if (source.host_data != nullptr) {
 		VkDeviceSize range = 0;
-		if (!g_render_ctx->GetBufferCache()->UploadHostData(
-		        buffer, g_render_ctx->GetGraphicCtx(), source.host_data, source.size, 16,
-		        &index_buffer, &index_offset, &range)) {
+		if (!g_render_ctx->GetBufferCache()->UploadHostData(buffer, g_render_ctx->GetGraphicCtx(),
+		                                                    source.host_data, source.size, 16,
+		                                                    &index_buffer, &index_offset, &range)) {
 			EXIT("failed to upload host index buffer\n");
 		}
 	} else {
@@ -1126,9 +1127,9 @@ void RenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx
 		instance_count = 1;
 	}
 
-	const DrawCallInfo draw {"DrawIndex",    CommandBufferDebugOp::DrawIndex,
-	                         index_count,    flags,
-	                         instance_count, first_instance};
+	const DrawCallInfo    draw {"DrawIndex",    CommandBufferDebugOp::DrawIndex,
+	                            index_count,    flags,
+	                            instance_count, first_instance};
 	std::vector<uint16_t> expanded_indices;
 	if (expand_index8_to_u16) {
 		EXIT_NOT_IMPLEMENTED(index_addr == nullptr);
@@ -1144,9 +1145,8 @@ void RenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx
 	index_source.address = reinterpret_cast<uint64_t>(index_addr);
 	index_source.host_data =
 	    expanded_indices.empty() ? nullptr : static_cast<const void*>(expanded_indices.data());
-	index_source.size = expanded_indices.empty()
-	                        ? index_size
-	                        : expanded_indices.size() * sizeof(uint16_t);
+	index_source.size =
+	    expanded_indices.empty() ? index_size : expanded_indices.size() * sizeof(uint16_t);
 	index_source.type = index_type;
 
 	DrawRenderState state {};

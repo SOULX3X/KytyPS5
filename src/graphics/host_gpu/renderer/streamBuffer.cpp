@@ -30,24 +30,22 @@ void HostStreamBuffer::EnsureBuffer(GraphicContext* ctx) {
 		return;
 	}
 	KYTY_PROFILER_BLOCK("HostStreamBuffer::create");
-	m_ctx                    = ctx;
-	m_buffer                 = std::make_unique<VulkanBuffer>();
-	m_buffer->usage          = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-	                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-	                          VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	m_ctx           = ctx;
+	m_buffer        = std::make_unique<VulkanBuffer>();
+	m_buffer->usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+	                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+	                  VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 	m_buffer->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) |
 	                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
 	                            VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 	VulkanCreateBuffer(ctx, CAPACITY, m_buffer.get());
 	VulkanMapMemory(ctx, &m_buffer->memory, &m_mapped);
 	const auto count = g_stream_buffer_count.fetch_add(1, std::memory_order_relaxed) + 1;
-	LOGF("HostStreamBuffer: created serial=%" PRIu64 " capacity=%" PRIu64 "\n", count,
-	     CAPACITY);
+	LOGF("HostStreamBuffer: created serial=%" PRIu64 " capacity=%" PRIu64 "\n", count, CAPACITY);
 }
 
-bool HostStreamBuffer::Copy(GraphicContext* ctx, const void* src, uint64_t size,
-                            uint64_t alignment, VulkanBuffer** out_buffer, uint64_t* out_offset,
-                            uint64_t* out_range) {
+bool HostStreamBuffer::Copy(GraphicContext* ctx, const void* src, uint64_t size, uint64_t alignment,
+                            VulkanBuffer** out_buffer, uint64_t* out_offset, uint64_t* out_range) {
 	KYTY_PROFILER_FUNCTION();
 	if (ctx == nullptr || src == nullptr || out_buffer == nullptr || out_offset == nullptr ||
 	    out_range == nullptr) {
@@ -69,10 +67,10 @@ bool HostStreamBuffer::Copy(GraphicContext* ctx, const void* src, uint64_t size,
 	}
 	EnsureBuffer(ctx);
 	std::memcpy(static_cast<uint8_t*>(m_mapped) + offset, src, static_cast<size_t>(size));
-	m_offset     = offset + size;
-	*out_buffer  = m_buffer.get();
-	*out_offset  = offset;
-	*out_range   = size;
+	m_offset    = offset + size;
+	*out_buffer = m_buffer.get();
+	*out_offset = offset;
+	*out_range  = size;
 	return true;
 }
 

@@ -217,7 +217,7 @@ void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, ui
 	Common::LockGuard lock(g_render_ctx->GetMutex());
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
-	auto* native    = g_render_ctx->GetTextureCache()->FindDepthTargetByRange(vaddr, size);
+	auto* native    = g_render_ctx->GetTextureCache()->FindDepthTargetByRange(buffer, vaddr, size);
 	if (native == nullptr) {
 		EXIT("depth-target barrier range has no cached image\n");
 	}

@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/image.h"
 #include "graphics/host_gpu/renderer/imageView.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
 #include "graphics/host_gpu/renderer/renderDraw.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
@@ -489,6 +490,11 @@ void Require(const char *shader_name, const char *stage, bool value,
   if (!value) {
     Fail(shader_name, stage, message);
   }
+}
+
+bool RejectUnexpectedPageFault(void *, PageFaultAccess, uint64_t, uint64_t,
+                               PageFaultPhase) noexcept {
+  return false;
 }
 
 struct TestCase {
@@ -1046,6 +1052,389 @@ public:
                 static_cast<int>(image_info.format),
                 static_cast<int>(view_info.format));
   }
+
+  void CheckRenderTargetViewCache() {
+    constexpr const char *name = "RenderTargetViewCache";
+    VkImageCreateInfo image_info{};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    image_info.extent = {8, 8, 1};
+    image_info.mipLevels = 2;
+    image_info.arrayLayers = 2;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkImage image_handle = VK_NULL_HANDLE;
+    RequireVk(name, "image",
+              vkCreateImage(m_device, &image_info, nullptr, &image_handle),
+              "vkCreateImage");
+    VkMemoryRequirements requirements{};
+    vkGetImageMemoryRequirements(m_device, image_handle, &requirements);
+    u32 memory_type = 0;
+    Require(name, "memory",
+            FindMemoryType(requirements.memoryTypeBits,
+                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memory_type) ||
+                FindMemoryType(requirements.memoryTypeBits, 0, &memory_type),
+            "no memory type for sampled render target");
+    VkMemoryAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = memory_type;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    RequireVk(name, "memory",
+              vkAllocateMemory(m_device, &allocation, nullptr, &memory),
+              "vkAllocateMemory");
+    RequireVk(name, "memory",
+              vkBindImageMemory(m_device, image_handle, memory, 0),
+              "vkBindImageMemory");
+
+    GraphicContext context{};
+    context.physical_device = m_physical_device;
+    context.device = m_device;
+    ResourceMutex resource_mutex;
+    PageManager page_manager(RejectUnexpectedPageFault, nullptr);
+    BufferCache buffer_cache(page_manager, resource_mutex);
+    TextureCache texture_cache(page_manager, buffer_cache, resource_mutex);
+    buffer_cache.SetTextureCache(texture_cache);
+    RenderTextureVulkanImage image;
+    image.image = image_handle;
+    image.format = image_info.format;
+    image.extent = {image_info.extent.width, image_info.extent.height};
+    image.layers = 2;
+    image.mip_levels = 2;
+
+    constexpr auto first_swizzle = DstSel(5, 1, 7, 0);
+    constexpr auto second_swizzle = DstSel(7, 4, 0, 1);
+    const auto first = texture_cache.GetSampledColorView(
+        &context, &image, image.format, first_swizzle, 0, 1,
+        VK_IMAGE_VIEW_TYPE_2D, 0, 1);
+    const auto first_again = texture_cache.GetSampledColorView(
+        &context, &image, image.format, first_swizzle, 0, 1,
+        VK_IMAGE_VIEW_TYPE_2D, 0, 1);
+    const auto second = texture_cache.GetSampledColorView(
+        &context, &image, image.format, second_swizzle, 0, 1,
+        VK_IMAGE_VIEW_TYPE_2D, 0, 1);
+    const auto different_mip = texture_cache.GetSampledColorView(
+        &context, &image, image.format, first_swizzle, 1, 1,
+        VK_IMAGE_VIEW_TYPE_2D, 0, 1);
+    const auto different_layer = texture_cache.GetSampledColorView(
+        &context, &image, image.format, first_swizzle, 0, 1,
+        VK_IMAGE_VIEW_TYPE_2D, 1, 1);
+    const auto array_view = texture_cache.GetSampledColorView(
+        &context, &image, image.format, first_swizzle, 0, 1,
+        VK_IMAGE_VIEW_TYPE_2D_ARRAY, 0, 2);
+    constexpr auto identity = DstSel(4, 5, 6, 7);
+    const auto native_format = texture_cache.GetSampledColorView(
+        &context, &image, image.format, identity, 0, 1, VK_IMAGE_VIEW_TYPE_2D,
+        0, 1);
+    const auto reinterpreted_format = texture_cache.GetSampledColorView(
+        &context, &image, VK_FORMAT_R8G8B8A8_UINT, identity, 0, 1,
+        VK_IMAGE_VIEW_TYPE_2D, 0, 1);
+    const auto storage = texture_cache.GetRenderTargetStorageView(
+        &context, &image, image.format, 0, 1, VK_IMAGE_VIEW_TYPE_2D, 0, 1);
+    const auto storage_again = texture_cache.GetRenderTargetStorageView(
+        &context, &image, image.format, 0, 1, VK_IMAGE_VIEW_TYPE_2D, 0, 1);
+    const auto attachment = texture_cache.GetRenderTargetAttachmentView(
+        &context, &image, image.format, 0, 0, 1);
+    const auto attachment_again = texture_cache.GetRenderTargetAttachmentView(
+        &context, &image, image.format, 0, 0, 1);
+    const auto attachment_mip = texture_cache.GetRenderTargetAttachmentView(
+        &context, &image, image.format, 1, 0, 1);
+    const auto attachment_array = texture_cache.GetRenderTargetAttachmentView(
+        &context, &image, image.format, 0, 0, 2);
+    Require(name, "cache identity",
+            first != VK_NULL_HANDLE && first_again == first &&
+                second != VK_NULL_HANDLE && second != first &&
+                different_mip != VK_NULL_HANDLE && different_mip != first &&
+                different_layer != VK_NULL_HANDLE && different_layer != first &&
+                array_view != VK_NULL_HANDLE && array_view != first &&
+                native_format != VK_NULL_HANDLE &&
+                reinterpreted_format != VK_NULL_HANDLE &&
+                reinterpreted_format != native_format &&
+                storage != VK_NULL_HANDLE && storage != native_format &&
+                storage_again == storage && attachment != VK_NULL_HANDLE &&
+                attachment_again == attachment && attachment != native_format &&
+                attachment != storage && attachment_mip != VK_NULL_HANDLE &&
+                attachment_mip != attachment && attachment_array != VK_NULL_HANDLE &&
+                attachment_array != attachment && image.view_cache.views.size() == 11,
+            "view cache omitted attachment usage, swizzle, format, type, mip, "
+            "or layer identity");
+
+    ImageViewOps::DestroyViews(&context, &image);
+    Require(name, "view teardown", image.view_cache.views.empty(),
+            "dynamic render-target views survived DestroyViews");
+    vkDestroyImage(m_device, image_handle, nullptr);
+    vkFreeMemory(m_device, memory, nullptr);
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
+  void CheckDepthTargetSampledViewCache() {
+    constexpr const char *name = "DepthTargetSampledViewCache";
+    VkImageCreateInfo image_info{};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = VK_FORMAT_D32_SFLOAT;
+    image_info.extent = {8, 8, 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 2;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                       VK_IMAGE_USAGE_SAMPLED_BIT;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkImage image_handle = VK_NULL_HANDLE;
+    RequireVk(name, "image",
+              vkCreateImage(m_device, &image_info, nullptr, &image_handle),
+              "vkCreateImage");
+    VkMemoryRequirements requirements{};
+    vkGetImageMemoryRequirements(m_device, image_handle, &requirements);
+    u32 memory_type = 0;
+    Require(name, "memory",
+            FindMemoryType(requirements.memoryTypeBits,
+                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memory_type) ||
+                FindMemoryType(requirements.memoryTypeBits, 0, &memory_type),
+            "no memory type for sampled depth target");
+    VkMemoryAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = memory_type;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    RequireVk(name, "memory",
+              vkAllocateMemory(m_device, &allocation, nullptr, &memory),
+              "vkAllocateMemory");
+    RequireVk(name, "memory",
+              vkBindImageMemory(m_device, image_handle, memory, 0),
+              "vkBindImageMemory");
+
+    GraphicContext context{};
+    context.physical_device = m_physical_device;
+    context.device = m_device;
+    ResourceMutex resource_mutex;
+    PageManager page_manager(RejectUnexpectedPageFault, nullptr);
+    BufferCache buffer_cache(page_manager, resource_mutex);
+    TextureCache texture_cache(page_manager, buffer_cache, resource_mutex);
+    buffer_cache.SetTextureCache(texture_cache);
+    DepthStencilVulkanImage image;
+    image.image = image_handle;
+    image.format = image_info.format;
+    image.extent = {image_info.extent.width, image_info.extent.height};
+    image.layers = image_info.arrayLayers;
+    image.mip_levels = image_info.mipLevels;
+
+    constexpr auto replicated = DstSel(4, 4, 4, 4);
+    constexpr auto r001 = DstSel(4, 0, 0, 1);
+    const auto first = texture_cache.GetDepthTargetSampledView(
+        &context, &image, VK_FORMAT_R32_SFLOAT, replicated, 0, 1,
+        VK_IMAGE_VIEW_TYPE_2D, 0, 1);
+    const auto first_again = texture_cache.GetDepthTargetSampledView(
+        &context, &image, VK_FORMAT_R32_SFLOAT, replicated, 0, 1,
+        VK_IMAGE_VIEW_TYPE_2D, 0, 1);
+    const auto different_swizzle = texture_cache.GetDepthTargetSampledView(
+        &context, &image, VK_FORMAT_R32_SFLOAT, r001, 0, 1,
+        VK_IMAGE_VIEW_TYPE_2D, 0, 1);
+    const auto different_layer = texture_cache.GetDepthTargetSampledView(
+        &context, &image, VK_FORMAT_R32_SFLOAT, replicated, 0, 1,
+        VK_IMAGE_VIEW_TYPE_2D, 1, 1);
+    const auto array_view = texture_cache.GetDepthTargetSampledView(
+        &context, &image, VK_FORMAT_R32_SFLOAT, replicated, 0, 1,
+        VK_IMAGE_VIEW_TYPE_2D_ARRAY, 0, 2);
+    const auto attachment = texture_cache.GetDepthTargetAttachmentView(
+        &context, &image, 0, 1);
+    const auto attachment_again = texture_cache.GetDepthTargetAttachmentView(
+        &context, &image, 0, 1);
+    const auto attachment_layer = texture_cache.GetDepthTargetAttachmentView(
+        &context, &image, 1, 1);
+    const auto attachment_array = texture_cache.GetDepthTargetAttachmentView(
+        &context, &image, 0, 2);
+    Require(name, "cache identity",
+            first != VK_NULL_HANDLE && first_again == first &&
+                different_swizzle != VK_NULL_HANDLE &&
+                different_swizzle != first &&
+                different_layer != VK_NULL_HANDLE && different_layer != first &&
+                array_view != VK_NULL_HANDLE && array_view != first &&
+                attachment != VK_NULL_HANDLE && attachment_again == attachment &&
+                attachment != first && attachment_layer != VK_NULL_HANDLE &&
+                attachment_layer != attachment && attachment_array != VK_NULL_HANDLE &&
+                attachment_array != attachment && image.view_cache.views.size() == 7,
+            "depth view cache omitted attachment usage, swizzle, type, or layer "
+            "identity");
+
+    ImageViewOps::DestroyViews(&context, &image);
+    Require(name, "view teardown", image.view_cache.views.empty(),
+            "dynamic depth-target views survived DestroyViews");
+    vkDestroyImage(m_device, image_handle, nullptr);
+    vkFreeMemory(m_device, memory, nullptr);
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
+  void CheckVideoOutSampledViewCache() {
+    constexpr const char *name = "VideoOutSampledViewCache";
+    auto backing = CreateImage2D(name, 8, 8, VK_FORMAT_R8G8B8A8_UNORM,
+                                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                     VK_IMAGE_USAGE_SAMPLED_BIT,
+                                 {}, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    GraphicContext context{};
+    context.physical_device = m_physical_device;
+    context.device = m_device;
+    ResourceMutex resource_mutex;
+    PageManager page_manager(RejectUnexpectedPageFault, nullptr);
+    BufferCache buffer_cache(page_manager, resource_mutex);
+    TextureCache texture_cache(page_manager, buffer_cache, resource_mutex);
+    buffer_cache.SetTextureCache(texture_cache);
+    VideoOutVulkanImage image;
+    image.image = backing.image;
+    image.format = backing.format;
+    image.extent = {backing.width, backing.height};
+    image.layers = 1;
+    image.mip_levels = 1;
+    image.image_view[VulkanImage::VIEW_DEFAULT] = backing.view;
+
+    constexpr auto identity = DstSel(4, 5, 6, 7);
+    constexpr auto bgra = DstSel(6, 5, 4, 7);
+    constexpr auto uncommon = DstSel(5, 1, 7, 0);
+    const auto default_view = texture_cache.GetSampledColorView(
+        &context, &image, image.format, identity, 0, 1, VK_IMAGE_VIEW_TYPE_2D,
+        0, 1);
+    const auto bgra_view = texture_cache.GetSampledColorView(
+        &context, &image, image.format, bgra, 0, 1, VK_IMAGE_VIEW_TYPE_2D, 0,
+        1);
+    const auto uncommon_view = texture_cache.GetSampledColorView(
+        &context, &image, image.format, uncommon, 0, 1, VK_IMAGE_VIEW_TYPE_2D,
+        0, 1);
+    const auto uncommon_again = texture_cache.GetSampledColorView(
+        &context, &image, image.format, uncommon, 0, 1, VK_IMAGE_VIEW_TYPE_2D,
+        0, 1);
+    Require(name, "cache identity",
+            default_view == backing.view && bgra_view != VK_NULL_HANDLE &&
+                bgra_view != default_view && uncommon_view != VK_NULL_HANDLE &&
+                uncommon_view != bgra_view && uncommon_again == uncommon_view &&
+                image.view_cache.views.size() == 2,
+            "video-out sampled views did not use identity fast path and lazy "
+            "mappings");
+
+    ImageViewOps::DestroyViews(&context, &image);
+    Require(name, "view teardown",
+            image.view_cache.views.empty() &&
+                std::all_of(std::begin(image.image_view),
+                            std::end(image.image_view),
+                            [](VkImageView view) { return view == VK_NULL_HANDLE; }),
+            "dynamic or fixed video-out views survived DestroyViews");
+    backing.view = VK_NULL_HANDLE;
+    DestroyImage(&backing);
+    std::printf("[host]    %-32s ok\n", name);
+  }
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+  void CheckQueryRegionImageClassification() {
+    constexpr const char *name = "QueryRegionImageClassification";
+    constexpr uintptr_t base = 0x0000000200100000ull;
+    constexpr uint64_t allocation_size = 0x4000;
+    auto *memory = static_cast<uint8_t *>(VirtualAlloc(
+        reinterpret_cast<void *>(base), allocation_size,
+        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    Require(name, "allocation", memory == reinterpret_cast<void *>(base),
+            "fixed VirtualAlloc failed");
+    std::memset(memory, 0, allocation_size);
+
+    EnsureRuntimeContext();
+    ResourceMutex resource_mutex;
+    PageManager page_manager(RejectUnexpectedPageFault, nullptr);
+    BufferCache buffer_cache(page_manager, resource_mutex);
+    TextureCache texture_cache(page_manager, buffer_cache, resource_mutex);
+    buffer_cache.SetTextureCache(texture_cache);
+    page_manager.OnGpuMap(base, allocation_size);
+
+    constexpr auto format =
+        Prospero::GpuEnumValue(Prospero::BufferFormat::k8_8_8_8UNorm);
+    constexpr auto linear =
+        Prospero::GpuEnumValue(Prospero::TileMode::kLinear);
+    ImageInfo sampled_info{};
+    sampled_info.address = base + 0x100;
+    sampled_info.format = format;
+    sampled_info.width = 4;
+    sampled_info.height = 4;
+    sampled_info.pitch = TileGetTexturePitch(format, sampled_info.width, 1, linear);
+    sampled_info.tile = linear;
+    sampled_info.type = Prospero::GpuEnumValue(Prospero::ImageType::kColor2D);
+    TileSizeAlign sampled_size{};
+    TileGetTextureTotalSize(format, sampled_info.width, sampled_info.height,
+                            sampled_info.depth, sampled_info.pitch,
+                            sampled_info.levels, linear, false, &sampled_size);
+    sampled_info.size = sampled_size.size;
+    Require(name, "sampled fixture",
+            sampled_info.size != 0 && sampled_size.align != 0 &&
+                sampled_info.size <= 0x600 &&
+                sampled_info.address % sampled_size.align == 0,
+            "sampled image does not fit the intended sub-page fixture");
+
+    RenderTargetInfo target_info{};
+    target_info.address = base + 0x1100;
+    target_info.size = 0x100;
+    target_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    target_info.width = 4;
+    target_info.height = 4;
+    target_info.pitch = 4;
+    target_info.bytes_per_element = 4;
+    target_info.tile_mode = linear;
+
+    {
+      CommandBuffer command(GraphicContext::QUEUE_GFX);
+      auto *sampled =
+          texture_cache.FindTexture(&command, &m_runtime_context, sampled_info, false);
+      auto *target =
+          texture_cache.FindRenderTarget(&command, &m_runtime_context, target_info);
+      Require(name, "registration", sampled != nullptr && target != nullptr,
+              "sampled or non-sampled image registration failed");
+
+      const auto sampled_bytes =
+          texture_cache.QueryRegion(sampled_info.address + 0x20, 0x20);
+      const auto sampled_page = texture_cache.QueryRegion(base + 0x800, 0x20);
+      Require(name, "sampled classification",
+              sampled_bytes.image_pages && sampled_bytes.image_bytes &&
+                  !sampled_bytes.gpu_image_bytes &&
+                  !sampled_bytes.non_sampled_pages && sampled_page.image_pages &&
+                  !sampled_page.image_bytes && !sampled_page.gpu_image_bytes &&
+                  !sampled_page.non_sampled_pages,
+              "sampled image page and byte ownership were not separated");
+
+      const auto target_bytes =
+          texture_cache.QueryRegion(target_info.address + 0x20, 0x20);
+      const auto target_page =
+          texture_cache.QueryRegion(target_info.address + 0x400, 0x20);
+      Require(name, "non-sampled classification",
+              target_bytes.image_pages && target_bytes.image_bytes &&
+                  !target_bytes.gpu_image_bytes && target_bytes.non_sampled_pages &&
+                  target_page.image_pages && !target_page.image_bytes &&
+                  !target_page.gpu_image_bytes && target_page.non_sampled_pages,
+              "non-sampled image page and byte ownership were not separated");
+
+      texture_cache.MarkGpuWritten(target);
+      const auto gpu_bytes =
+          texture_cache.QueryRegion(target_info.address + 0x20, 0x20);
+      const auto gpu_page =
+          texture_cache.QueryRegion(target_info.address + 0x400, 0x20);
+      Require(name, "GPU ownership",
+              gpu_bytes.image_pages && gpu_bytes.image_bytes &&
+                  gpu_bytes.gpu_image_bytes && gpu_bytes.non_sampled_pages &&
+                  gpu_page.image_pages && !gpu_page.image_bytes &&
+                  !gpu_page.gpu_image_bytes && gpu_page.non_sampled_pages,
+              "GPU ownership escaped the target's exact byte range");
+
+      texture_cache.UnmapMemory(base, allocation_size);
+      page_manager.OnGpuUnmap(base, allocation_size);
+    }
+    Require(name, "free", VirtualFree(memory, 0, MEM_RELEASE) != 0,
+            "VirtualFree failed");
+    std::printf("[host]    %-32s ok\n", name);
+  }
+#endif
 
   Buffer CreateStorageBuffer(const char *shader_name,
                              const std::vector<u32> &initial,
@@ -1981,6 +2370,37 @@ public:
   }
 
 private:
+  void EnsureRuntimeContext() {
+    if (m_runtime_context.allocator != VK_NULL_HANDLE) {
+      return;
+    }
+    m_runtime_context.instance = m_instance;
+    m_runtime_context.physical_device = m_physical_device;
+    m_runtime_context.device = m_device;
+    vkGetPhysicalDeviceProperties(m_physical_device,
+                                  &m_runtime_context.physical_device_properties);
+    m_runtime_context.physical_device_memory_properties = m_memory_properties;
+    for (auto &queue : m_runtime_context.queues) {
+      queue.mutex = &m_runtime_queue_mutex;
+      queue.family = m_queue_family;
+      queue.index = 0;
+      queue.vk_queue = m_queue;
+    }
+
+    VmaAllocatorCreateInfo allocator_info{};
+    allocator_info.instance = m_instance;
+    allocator_info.physicalDevice = m_physical_device;
+    allocator_info.device = m_device;
+    allocator_info.vulkanApiVersion = VK_API_VERSION_1_2;
+    RequireVk("VulkanHarness", "runtime context",
+              vmaCreateAllocator(&allocator_info, &m_runtime_context.allocator),
+              "vmaCreateAllocator");
+    if (g_render_ctx == nullptr) {
+      GraphicsRenderInit();
+    }
+    g_render_ctx->SetGraphicCtx(&m_runtime_context);
+  }
+
   void Init() {
     VkApplicationInfo app{};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -2073,6 +2493,12 @@ private:
   void Destroy() {
     if (m_device != VK_NULL_HANDLE) {
       vkDeviceWaitIdle(m_device);
+      if (m_runtime_context.allocator != VK_NULL_HANDLE) {
+        GraphicsRenderReleaseThreadCommandPools();
+        UtilReleaseCachedResources(&m_runtime_context);
+        vmaDestroyAllocator(m_runtime_context.allocator);
+        m_runtime_context.allocator = VK_NULL_HANDLE;
+      }
       if (m_command_pool != VK_NULL_HANDLE) {
         vkDestroyCommandPool(m_device, m_command_pool, nullptr);
       }
@@ -2308,6 +2734,8 @@ private:
   VkCommandPool m_command_pool = VK_NULL_HANDLE;
   u32 m_queue_family = 0;
   VkPhysicalDeviceMemoryProperties m_memory_properties{};
+  Common::Mutex m_runtime_queue_mutex;
+  GraphicContext m_runtime_context{};
 };
 
 void CompareWords(const TestCase &test, const char *stage,
@@ -8730,7 +9158,7 @@ void CheckReverseRenderTargetFormatContract() {
   if (std::strcmp(kind, "sampled") == 0) {
     (void)SelectSampledColorView(VK_FORMAT_R8G8B8A8_UNORM,
                                  VK_FORMAT_R8G8B8A8_UNORM,
-                                 DstSel(4, 5, 6, 0));
+                                 DstSel(4, 5, 6, 2));
   } else if (std::strcmp(kind, "sampled-compatible-swizzle") == 0) {
     (void)SelectSampledColorView(VK_FORMAT_B8G8R8A8_UNORM,
                                  VK_FORMAT_R8G8B8A8_UNORM,
@@ -8759,10 +9187,10 @@ void CheckReverseRenderTargetFormatContract() {
     (void)SelectSampledColorView(VK_FORMAT_A2B10G10R10_UNORM_PACK32,
                                  VK_FORMAT_A2R10G10B10_UNORM_PACK32,
                                  DstSel(6, 5, 4, 7));
-  } else if (std::strcmp(kind, "sampled-abgr-format") == 0) {
+  } else if (std::strcmp(kind, "sampled-invalid-high") == 0) {
     (void)SelectSampledColorView(VK_FORMAT_R8G8B8A8_UNORM,
                                  VK_FORMAT_R8G8B8A8_UNORM,
-                                 DstSel(7, 6, 5, 4));
+                                 DstSel(7, 6, 5, 3));
   } else if (std::strcmp(kind, "sampled-depth-format") == 0) {
     (void)SelectSampledDepthView(VK_FORMAT_D24_UNORM_S8_UINT,
                                  VK_FORMAT_R32_SFLOAT, DstSel(4, 4, 4, 4));
@@ -8811,95 +9239,135 @@ void CheckSampledColorViews() {
   Require("SampledColorViews", "identity",
           SelectSampledColorView(VK_FORMAT_R8G8B8A8_UNORM,
                                  VK_FORMAT_R8G8B8A8_UNORM,
-                                 DstSel(4, 5, 6, 7)) == VulkanImage::VIEW_DEFAULT,
+                                 DstSel(4, 5, 6, 7)) == DstSel(4, 5, 6, 7),
           "RGBA did not select the identity view");
+  uint32_t valid_swizzles = 0;
+  for (uint32_t swizzle = 0; swizzle <= 0xfffu; swizzle++) {
+    bool expected = true;
+    for (uint32_t channel = 0; channel < 4; channel++) {
+      const auto selector = GetDstSel(swizzle, channel);
+      if (selector == 2 || selector == 3) {
+        expected = false;
+      }
+    }
+    const bool valid = IsValidSampledColorSwizzle(swizzle);
+    const bool supported = IsSupportedSampledColorView(
+        VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, swizzle);
+    Require("SampledColorViews", "exhaustive read swizzle domain",
+            valid == expected && supported == expected,
+            "sampled swizzle validator disagreed with the PS5 selector domain");
+    valid_swizzles += valid;
+  }
+  Require("SampledColorViews", "all PS5 read swizzles",
+          valid_swizzles == 1296 &&
+              !IsValidSampledColorSwizzle(DstSel(4, 5, 6, 2)) &&
+              !IsValidSampledColorSwizzle(DstSel(4, 5, 6, 3)) &&
+              !IsValidSampledColorSwizzle(0x1000),
+          "valid PS5 sampled mappings were rejected or reserved selectors were "
+          "admitted");
+  const auto arbitrary = DstSel(5, 1, 7, 0);
+  const auto components = TextureGetComponentMapping(arbitrary);
+  Require("SampledColorViews", "generic Vulkan component mapping",
+          SelectSampledColorView(VK_FORMAT_R8G8B8A8_UNORM,
+                                 VK_FORMAT_R8G8B8A8_UNORM,
+                                 arbitrary) == arbitrary &&
+              components.r == VK_COMPONENT_SWIZZLE_G &&
+              components.g == VK_COMPONENT_SWIZZLE_ONE &&
+              components.b == VK_COMPONENT_SWIZZLE_A &&
+              components.a == VK_COMPONENT_SWIZZLE_ZERO,
+          "arbitrary valid sampled mapping did not use the generic view path");
   Require("SampledColorViews", "R8 R001",
           SelectSampledColorView(VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM,
-                                 DstSel(4, 0, 0, 1)) == VulkanImage::VIEW_R001,
+                                 DstSel(4, 0, 0, 1)) == DstSel(4, 0, 0, 1),
           "R8 did not select its R001 view");
+  Require("SampledColorViews", "R8 000R",
+          SelectSampledColorView(VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM,
+                                 DstSel(0, 0, 0, 4)) == DstSel(0, 0, 0, 4),
+          "R8 did not select its 000R component-mapped view");
   Require("SampledColorViews", "R16G16 RG01",
           SelectSampledColorView(VK_FORMAT_R16G16_SFLOAT,
                                  VK_FORMAT_R16G16_SFLOAT,
-                                 DstSel(4, 5, 0, 1)) == VulkanImage::VIEW_RG01,
+                                 DstSel(4, 5, 0, 1)) == DstSel(4, 5, 0, 1),
           "R16G16 did not select its RG01 view");
   Require("SampledColorViews", "alpha one",
           SelectSampledColorView(VK_FORMAT_R8G8B8A8_UNORM,
                                  VK_FORMAT_R8G8B8A8_UNORM,
-                                 DstSel(4, 5, 6, 1)) == VulkanImage::VIEW_RGB1,
+                                 DstSel(4, 5, 6, 1)) == DstSel(4, 5, 6, 1),
           "RGB1 did not select the alpha-one view");
   Require("SampledColorViews", "mutable BGRA target",
           SelectSampledColorView(VK_FORMAT_B8G8R8A8_UNORM,
                                  VK_FORMAT_R8G8B8A8_UNORM,
-                                 DstSel(6, 5, 4, 7)) == VulkanImage::VIEW_BGRA_TO_RGBA,
+                                 DstSel(6, 5, 4, 7)) == DstSel(6, 5, 4, 7),
           "BGRA target did not select the exact RGBA/BGRA mutable view");
-  Require("SampledColorViews", "mutable sRGB view of UNORM BGRA target",
-          SelectSampledColorView(VK_FORMAT_B8G8R8A8_UNORM,
-                                 VK_FORMAT_R8G8B8A8_SRGB,
-                                 DstSel(6, 5, 4, 7)) == VulkanImage::VIEW_BGRA_TO_RGBA,
-          "UNORM BGRA target did not select its compatible sRGB RGBA sampled view");
+  Require(
+      "SampledColorViews", "mutable sRGB view of UNORM BGRA target",
+      SelectSampledColorView(VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB,
+                             DstSel(6, 5, 4, 7)) == DstSel(6, 5, 4, 7),
+      "UNORM BGRA target did not select its compatible sRGB RGBA sampled view");
   Require("SampledColorViews", "mutable sRGB BGRA target",
           BgraToRgbaSampledViewFormat(VK_FORMAT_B8G8R8A8_SRGB) ==
                   VK_FORMAT_R8G8B8A8_SRGB &&
               SelectSampledColorView(VK_FORMAT_B8G8R8A8_SRGB,
                                      VK_FORMAT_R8G8B8A8_SRGB,
-                                     DstSel(6, 5, 4, 7)) ==
-                  VulkanImage::VIEW_BGRA_TO_RGBA,
+                                     DstSel(6, 5, 4, 7)) == DstSel(6, 5, 4, 7),
           "sRGB BGRA target did not select its matching mutable RGBA view");
+  constexpr auto colorspace_swizzle = DstSel(5, 1, 7, 0);
+  Require("SampledColorViews", "mutable sRGB/UNORM views",
+          SelectSampledColorView(VK_FORMAT_R8G8B8A8_SRGB,
+                                 VK_FORMAT_R8G8B8A8_UNORM,
+                                 DstSel(4, 5, 6, 7)) == DstSel(4, 5, 6, 7) &&
+              SelectSampledColorView(VK_FORMAT_B8G8R8A8_UNORM,
+                                     VK_FORMAT_B8G8R8A8_SRGB,
+                                     colorspace_swizzle) == colorspace_swizzle,
+          "same-order mutable sRGB/UNORM sampled views were rejected");
   Require("SampledColorViews", "mutable packed RGB10 view",
           BgraToRgbaSampledViewFormat(VK_FORMAT_A2R10G10B10_UNORM_PACK32) ==
                   VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
               SelectSampledColorView(VK_FORMAT_A2R10G10B10_UNORM_PACK32,
                                      VK_FORMAT_A2B10G10R10_UNORM_PACK32,
-                                     DstSel(6, 5, 4, 7)) ==
-                  VulkanImage::VIEW_BGRA_TO_RGBA,
+                                     DstSel(6, 5, 4, 7)) == DstSel(6, 5, 4, 7),
           "packed RGB10 target did not select its matching mutable channel-order view");
   Require("SampledColorViews", "reverse RGBA16F sampled view",
           SelectSampledColorView(VK_FORMAT_R16G16B16A16_SFLOAT,
                                  VK_FORMAT_R16G16B16A16_SFLOAT,
-                                 DstSel(7, 6, 5, 4)) == VulkanImage::VIEW_ABGR,
+                                 DstSel(7, 6, 5, 4)) == DstSel(7, 6, 5, 4),
           "reverse RGBA16F target did not select its reciprocal ABGR sampled view");
   Require("SampledColorViews", "mutable integer-class views",
           SelectSampledColorView(VK_FORMAT_R16G16B16A16_SFLOAT,
                                  VK_FORMAT_R16G16B16A16_UINT,
-                                 DstSel(4, 5, 6, 7)) == VulkanImage::VIEW_DEFAULT &&
+                                 DstSel(4, 5, 6, 7)) == DstSel(4, 5, 6, 7) &&
               SelectSampledColorView(VK_FORMAT_R8G8B8A8_UNORM,
                                      VK_FORMAT_R8G8B8A8_UINT,
-                                     DstSel(4, 5, 6, 7)) == VulkanImage::VIEW_DEFAULT &&
+                                     DstSel(4, 5, 6, 7)) == DstSel(4, 5, 6, 7) &&
               SelectSampledColorView(VK_FORMAT_R8G8B8A8_UINT,
                                      VK_FORMAT_R8G8B8A8_UNORM,
-                                     DstSel(4, 5, 6, 7)) == VulkanImage::VIEW_DEFAULT,
+                                     DstSel(4, 5, 6, 7)) == DstSel(4, 5, 6, 7),
           "compatible integer render-target sampled view was rejected");
   Require("SampledColorViews", "D32 depth target",
           SelectSampledDepthView(VK_FORMAT_D32_SFLOAT_S8_UINT,
                                  VK_FORMAT_R32_SFLOAT,
-                                 DstSel(4, 4, 4, 4)) ==
-              VulkanImage::VIEW_DEPTH_TEXTURE,
+                                 DstSel(4, 4, 4, 4)) == DstSel(4, 4, 4, 4),
           "D32 depth target did not select its depth-aspect view");
   Require("SampledColorViews", "D16 R000 depth target",
           SelectSampledDepthView(VK_FORMAT_D16_UNORM, VK_FORMAT_R16_UNORM,
-                                 DstSel(4, 0, 0, 0)) ==
-              VulkanImage::VIEW_R000,
+                                 DstSel(4, 0, 0, 0)) == DstSel(4, 0, 0, 0),
           "D16 depth target did not select its R000 depth-aspect view");
   Require("SampledColorViews", "D16S8 R001 depth target",
           SelectSampledDepthView(VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_R16_UNORM,
-                                 DstSel(4, 0, 0, 1)) ==
-              VulkanImage::VIEW_R001,
+                                 DstSel(4, 0, 0, 1)) == DstSel(4, 0, 0, 1),
           "D16S8 depth target did not select its R001 depth-aspect view");
   Require("SampledColorViews", "promoted D24S8 R001 depth target",
           SelectSampledDepthView(VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_R16_UNORM,
-                                 DstSel(4, 0, 0, 1)) ==
-              VulkanImage::VIEW_R001,
+                                 DstSel(4, 0, 0, 1)) == DstSel(4, 0, 0, 1),
           "D24S8 host fallback did not preserve the guest R16 depth view");
   Require("SampledColorViews", "promoted D32S8 R001 depth target",
           SelectSampledDepthView(VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_R16_UNORM,
-                                 DstSel(4, 0, 0, 1)) ==
-              VulkanImage::VIEW_R001,
+                                 DstSel(4, 0, 0, 1)) == DstSel(4, 0, 0, 1),
           "D32S8 host fallback did not preserve the guest R16 depth view");
   Require("SampledColorViews", "D32S8 R001 depth target",
           SelectSampledDepthView(VK_FORMAT_D32_SFLOAT_S8_UINT,
                                  VK_FORMAT_R32_SFLOAT,
-                                 DstSel(4, 0, 0, 1)) ==
-              VulkanImage::VIEW_R001,
+                                 DstSel(4, 0, 0, 1)) == DstSel(4, 0, 0, 1),
           "D32S8 depth target did not select its R001 depth-aspect view");
   Require("SampledColorViews", "storage identity",
           SelectStorageColorView(VK_FORMAT_R8G8B8A8_UNORM,
@@ -8981,7 +9449,7 @@ void CheckSampledColorViews() {
        {"sampled", "sampled-compatible-swizzle", "sampled-compatible-reverse",
         "sampled-compatible-colorspace",
         "sampled-compatible-snorm", "sampled-rgb10-swizzle",
-        "sampled-rgb10-reverse", "sampled-abgr-format", "sampled-depth-format",
+        "sampled-rgb10-reverse", "sampled-invalid-high", "sampled-depth-format",
         "sampled-depth-swizzle", "storage", "storage-format",
         "storage-compatible-swizzle", "storage-abgr", "storage-kind", "storage-no-write",
         "storage-atomic", "storage-compare", "storage-mip",
@@ -9047,9 +9515,20 @@ void CheckSampledDepthResource() {
           "dynamic-storage mip depth resource was accepted");
   resource = basic;
   resource.dimension = ShaderRecompiler::Decoder::ImageDimension::Dim2DArray;
-  Require("SampledDepthResource", "array rejected",
-          !IsSupportedSampledDepthResource(resource),
-          "array depth resource was accepted");
+  Require("SampledDepthResource", "singleton array accepted",
+          IsSupportedSampledDepthResource(resource),
+          "array depth resource was rejected");
+  const auto singleton_array_view = ResolveTargetTextureView(
+      resource, Prospero::ImageType::kColor2DArray, 0, 1);
+  Require("SampledDepthResource", "singleton array view",
+          singleton_array_view.type == VK_IMAGE_VIEW_TYPE_2D_ARRAY &&
+              singleton_array_view.base_layer == 0 &&
+              singleton_array_view.layer_count == 1,
+          "singleton depth array did not preserve the shader array view type");
+  Require("SampledDepthResource", "array type mismatch rejected",
+          ResolveTargetTextureView(resource, Prospero::ImageType::kColor2D, 0, 1)
+                  .type == VK_IMAGE_VIEW_TYPE_MAX_ENUM,
+          "array shader resource accepted a non-array descriptor view");
   resource = basic;
   resource.kind = ShaderRecompiler::IR::ResourceKind::ImageUint;
   Require("SampledDepthResource", "integer rejected",
@@ -9069,6 +9548,50 @@ void CheckSampledDepthResource() {
   std::printf("[host]    %-32s ok\n", "SampledDepthResource");
 }
 
+void CheckSampledVideoOutView() {
+  ShaderRecompiler::IR::ImageResource resource{};
+  resource.kind = ShaderRecompiler::IR::ResourceKind::Image;
+  resource.dimension = ShaderRecompiler::Decoder::ImageDimension::Dim2D;
+  resource.read = true;
+
+  ShaderTextureResource descriptor{};
+  descriptor.fields[3] = Prospero::GpuEnumValue(Prospero::ImageType::kColor2D)
+                         << 28u;
+  VulkanImage image{VulkanImageType::VideoOut};
+  image.layers = 1;
+  Require("SampledVideoOutView", "basic 2D",
+          IsSupportedSampledVideoOutView(resource, descriptor, image),
+          "basic 2D video-out view was rejected");
+
+  const auto basic_resource = resource;
+  resource.dimension = ShaderRecompiler::Decoder::ImageDimension::Dim2DArray;
+  const bool rejects_array_resource =
+      !IsSupportedSampledVideoOutView(resource, descriptor, image);
+  resource = basic_resource;
+  descriptor.fields[3] =
+      Prospero::GpuEnumValue(Prospero::ImageType::kColor2DArray) << 28u;
+  const bool rejects_array_descriptor =
+      !IsSupportedSampledVideoOutView(resource, descriptor, image);
+  descriptor.fields[3] = Prospero::GpuEnumValue(Prospero::ImageType::kColor2D)
+                         << 28u;
+  descriptor.fields[4] = 1u << 16u;
+  const bool rejects_base_layer =
+      !IsSupportedSampledVideoOutView(resource, descriptor, image);
+  descriptor.fields[4] = 1u;
+  const bool rejects_layer_count =
+      !IsSupportedSampledVideoOutView(resource, descriptor, image);
+  descriptor.fields[4] = 0;
+  image.layers = 2;
+  const bool rejects_layered_image =
+      !IsSupportedSampledVideoOutView(resource, descriptor, image);
+  Require("SampledVideoOutView", "array hard failures",
+          rejects_array_resource && rejects_array_descriptor &&
+              rejects_base_layer && rejects_layer_count &&
+              rejects_layered_image,
+          "unsupported layered video-out view was accepted");
+  std::printf("[host]    %-32s ok\n", "SampledVideoOutView");
+}
+
 void CheckSampledDepthDescriptor() {
   ShaderTextureResource descriptor{{0x00eb0900u, 0xc1600000u, 0x00bcc14fu,
                                     0x91800924u, 0x00000000u, 0x00700000u,
@@ -9084,6 +9607,16 @@ void CheckSampledDepthDescriptor() {
                                   descriptor.TileMode()) == 1408 &&
               IsSupportedDepthTargetDescriptor(descriptor, image),
           "valid padded-pitch depth texture was rejected");
+
+  descriptor.fields[3] =
+      (descriptor.fields[3] & ~(0xfu << 28u)) |
+      (Prospero::GpuEnumValue(Prospero::ImageType::kColor2DArray) << 28u);
+  Require("SampledDepthDescriptor", "singleton array descriptor",
+          IsSupportedDepthTargetDescriptor(descriptor, image),
+          "valid singleton-array depth texture was rejected");
+  descriptor.fields[3] =
+      (descriptor.fields[3] & ~(0xfu << 28u)) |
+      (Prospero::GpuEnumValue(Prospero::ImageType::kColor2D) << 28u);
 
   image.guest_pitch = 1344;
   Require("SampledDepthDescriptor", "target pitch mismatch",
@@ -9362,7 +9895,7 @@ ShaderTextureResource BasicUintVolumeStorageTextureDescriptor() {
   } else if (std::strcmp(kind, "depth-tile-extent") == 0) {
     resource = Ppsa14053DepthTileStorageTextureResource();
     descriptor = Ppsa14053DepthTileStorageTextureDescriptor();
-    descriptor.fields[2] |= 1u;
+	    descriptor.fields[4] |= 1u;
   } else {
     std::_Exit(0x7e);
   }
@@ -9912,6 +10445,26 @@ void CheckStandard64RenderTargetTileRoundTrip() {
               standard[16] == 512 && standard[32] == 4 &&
               standard[16383] == 16383,
           "Standard64KB reciprocal mapping disagreed with the PS5 SDK");
+
+  constexpr uint32_t block_width_16 = 256;
+  constexpr uint32_t block_height_16 = 128;
+  std::vector<uint16_t> tiled_16(block_size / sizeof(uint16_t));
+  for (uint32_t i = 0; i < tiled_16.size(); i++) {
+    tiled_16[i] = static_cast<uint16_t>(i);
+  }
+  std::vector<uint16_t> linear_16(tiled_16.size(), 0xffffu);
+  TileConvertTiledToLinearStandard64KB16(
+      linear_16.data(), tiled_16.data(), block_width_16, block_height_16,
+      block_width_16, block_size);
+  const auto sample_16 = [&](uint32_t x, uint32_t y) {
+    return linear_16[static_cast<uint64_t>(y) * block_width_16 + x];
+  };
+  Require("Standard64RenderTarget", "16-bit SDK byte mapping",
+          sample_16(0, 0) == 0 && sample_16(1, 0) == 1 &&
+              sample_16(2, 0) == 2 && sample_16(4, 0) == 4 &&
+              sample_16(8, 0) == 64 && sample_16(0, 1) == 8 &&
+              sample_16(0, 2) == 16 && sample_16(0, 4) == 32,
+          "Standard64KB 16-bit mapping interleaved X/Y address bits incorrectly");
   TileConvertLinearToTiledRenderTarget(
       render_target.data(), known.data(), block_width, block_height,
       block_width, sizeof(uint32_t), block_size);
@@ -10469,6 +11022,34 @@ void CheckStorageTextureSampledReuse() {
   std::printf("[host]    %-32s ok\n", "StorageTextureSampledReuse");
 }
 
+void CheckStorageTextureDepthAlias() {
+  ImageInfo storage{};
+  storage.address = 0x201ae60000ull;
+  storage.size = 0x870000;
+  DepthTargetInfo depth{};
+  depth.address = 0x2046ca0000ull;
+  depth.size = 0x1fe0000;
+  depth.stencil_address = storage.address;
+  depth.stencil_size = storage.size;
+  Require("StorageTextureDepthAlias", "inactive stencil",
+          ClassifyStorageDepthOverlap(storage, depth) == DepthOverlap::RetireStorage,
+          "inactive stencil storage ownership was not retired");
+  depth.stencil_access = true;
+  Require("StorageTextureDepthAlias", "active stencil",
+          ClassifyStorageDepthOverlap(storage, depth) == DepthOverlap::Unsupported,
+          "active stencil storage contents were discarded");
+  depth.stencil_access = false;
+  storage.address = depth.address;
+  Require("StorageTextureDepthAlias", "depth aspect",
+          ClassifyStorageDepthOverlap(storage, depth) == DepthOverlap::Unsupported,
+          "depth-aspect storage contents were discarded");
+  storage.address = 0x2000000000ull;
+  Require("StorageTextureDepthAlias", "disjoint",
+          ClassifyStorageDepthOverlap(storage, depth) == DepthOverlap::None,
+          "disjoint storage image was classified as an alias");
+  std::printf("[host]    %-32s ok\n", "StorageTextureDepthAlias");
+}
+
 [[noreturn]] void RunStorageTextureAccessDeathCase(const char *kind) {
   constexpr uintptr_t base = 0x0000000200300000ull;
   constexpr uint64_t size = 0x10000;
@@ -10702,7 +11283,7 @@ void CheckOverlappingMetadataViews() {
           page_manager.HandleFault(PageFaultAccess::Write, second),
           "shared metadata page did not transfer to CPU ownership");
   Require("OverlappingMetadataViews", "ownership",
-          !texture_cache.IsMetaGpuModified(second, 0x1000),
+          !texture_cache.QueryRegion(second, 0x1000).gpu_metadata_bytes,
           "shared metadata page retained GPU ownership after a CPU fault");
 
   texture_cache.UnmapMemory(base, allocation_size);
@@ -10710,6 +11291,62 @@ void CheckOverlappingMetadataViews() {
   Require("OverlappingMetadataViews", "free",
           VirtualFree(memory, 0, MEM_RELEASE) != 0, "VirtualFree failed");
   std::printf("[host]    %-32s ok\n", "OverlappingMetadataViews");
+}
+
+void CheckQueryRegionAggregation() {
+  constexpr uintptr_t base = 0x0000000200010000ull;
+  constexpr uint64_t allocation_size = 0x10000;
+  constexpr uint64_t metadata_size = 0x180;
+  auto *memory = static_cast<uint8_t *>(VirtualAlloc(
+      reinterpret_cast<void *>(base), allocation_size,
+      MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+  Require("QueryRegionAggregation", "allocation",
+          memory == reinterpret_cast<void *>(base), "fixed VirtualAlloc failed");
+
+  ResourceMutex resource_mutex;
+  CacheFaultContext fault_context;
+  PageManager page_manager(CacheFault, &fault_context);
+  BufferCache buffer_cache(page_manager, resource_mutex);
+  TextureCache texture_cache(page_manager, buffer_cache, resource_mutex);
+  fault_context.texture = &texture_cache;
+  buffer_cache.SetTextureCache(texture_cache);
+  page_manager.OnGpuMap(base, allocation_size);
+
+  const auto empty = texture_cache.QueryRegion(base + 0x20, 0x40);
+  Require("QueryRegionAggregation", "empty",
+          !empty.image_pages && !empty.image_bytes && !empty.gpu_image_bytes &&
+              !empty.non_sampled_pages && !empty.metadata_pages &&
+              !empty.metadata_bytes && !empty.gpu_metadata_bytes,
+          "empty region reported cached ownership");
+
+  texture_cache.RegisterMeta(base, metadata_size);
+  const auto bytes = texture_cache.QueryRegion(base + 0x20, 0x40);
+  const auto page_only = texture_cache.QueryRegion(base + 0x400, 0x40);
+  const auto disjoint = texture_cache.QueryRegion(base + 0x1000, 0x40);
+  Require("QueryRegionAggregation", "page and byte overlap",
+          bytes.metadata_pages && bytes.metadata_bytes &&
+              !bytes.gpu_metadata_bytes && page_only.metadata_pages &&
+              !page_only.metadata_bytes && !page_only.gpu_metadata_bytes &&
+              !disjoint.metadata_pages && !disjoint.metadata_bytes &&
+              !bytes.image_pages && !bytes.image_bytes &&
+              !bytes.gpu_image_bytes && !bytes.non_sampled_pages,
+          "metadata page candidates were not separated from exact byte overlap");
+
+  Require("QueryRegionAggregation", "clear", texture_cache.ClearMeta(base),
+          "metadata clear setup failed");
+  const auto gpu_bytes = texture_cache.QueryRegion(base + 0x20, 0x40);
+  const auto gpu_page_only = texture_cache.QueryRegion(base + 0x400, 0x40);
+  Require("QueryRegionAggregation", "GPU ownership",
+          gpu_bytes.metadata_pages && gpu_bytes.metadata_bytes &&
+              gpu_bytes.gpu_metadata_bytes && gpu_page_only.metadata_pages &&
+              !gpu_page_only.metadata_bytes && !gpu_page_only.gpu_metadata_bytes,
+          "GPU metadata ownership escaped its exact registered byte range");
+
+  texture_cache.UnmapMemory(base, allocation_size);
+  page_manager.OnGpuUnmap(base, allocation_size);
+  Require("QueryRegionAggregation", "free", VirtualFree(memory, 0, MEM_RELEASE) != 0,
+          "VirtualFree failed");
+  std::printf("[host]    %-32s ok\n", "QueryRegionAggregation");
 }
 
 void CheckGpuMetadataReuse() {
@@ -10740,7 +11377,7 @@ void CheckGpuMetadataReuse() {
       texture_cache.InvalidateMemoryFromGPU(base, allocation_size);
   Require("GpuMetadataReuse", "discard",
           !full_image_transition && !texture_cache.IsMeta(base) &&
-              !texture_cache.HasMetaRangeOverlap(base, allocation_size),
+              !texture_cache.QueryRegion(base, allocation_size).metadata_bytes,
           "metadata-only overwrite retained identity or claimed an image transition");
   texture_cache.RegisterMeta(base, metadata_size, layers);
   Require("GpuMetadataReuse", "re-register",
@@ -11149,6 +11786,49 @@ void CheckImageOverlapResolution() {
           ClassifySampledOverlap(sampled_alias, sampled, false, false) ==
               SampledOverlap::Unsupported,
           "cross-context sampled alias was admitted");
+  ImageInfo dirty_info{};
+  dirty_info.address = 0x500100;
+  dirty_info.size = 0x100;
+  Image dirty_image;
+  dirty_image = dirty_info;
+  dirty_image.InvalidateCpuWrite(0x500300, 0x10);
+  Require("ImageOverlapResolution", "sampled edge-page maybe dirty",
+          dirty_image.IsCpuDirty() && dirty_image.IsMaybeCpuDirty() &&
+              !dirty_image.IsDefinitelyCpuDirty(),
+          "byte-disjoint write sharing a tracker page was not kept maybe-dirty");
+  Require("ImageOverlapResolution", "sampled edge hash required",
+          dirty_image.NeedsMaybeCpuHash(),
+          "collapsed edge tracking did not request a baseline hash");
+  dirty_image.SetMaybeCpuHash(0x1234);
+  Require("ImageOverlapResolution", "sampled unchanged edge hash",
+          !dirty_image.ResolveMaybeCpuHash(0x1234) && !dirty_image.IsCpuDirty() &&
+              dirty_image.IsCpuTrackingComplete(),
+          "unchanged edge bytes forced an image upload");
+  dirty_image.InvalidateCpuWrite(0x500300, 0x10);
+  dirty_image.SetMaybeCpuHash(0x1234);
+  Require("ImageOverlapResolution", "sampled changed edge hash",
+          dirty_image.ResolveMaybeCpuHash(0x5678) &&
+              dirty_image.IsDefinitelyCpuDirty(),
+          "changed edge bytes were not promoted to definitely dirty");
+  dirty_image.RefreshComplete();
+  dirty_image.InvalidateCpuWrite(dirty_info.address, 1);
+  Require("ImageOverlapResolution", "sampled byte overlap dirty",
+          dirty_image.IsCpuDirty() && dirty_image.IsDefinitelyCpuDirty() &&
+              !dirty_image.IsMaybeCpuDirty(),
+          "true byte overlap was not promoted to definitely dirty");
+  ImageInfo two_page_info{};
+  two_page_info.address = 0x600100;
+  two_page_info.size = 0x1800;
+  Image two_page_image;
+  two_page_image = two_page_info;
+  two_page_image.InvalidateCpuWrite(0x600000, 1);
+  Require("ImageOverlapResolution", "sampled head tracking shrink",
+          !two_page_image.IsCpuDirty(),
+          "a single disjoint edge fault prematurely dirtied a two-page image");
+  two_page_image.InvalidateCpuWrite(0x601a00, 1);
+  Require("ImageOverlapResolution", "sampled head-tail collapse",
+          two_page_image.IsMaybeCpuDirty() && two_page_image.NeedsMaybeCpuHash(),
+          "both disjoint edge faults did not collapse logical tracking");
   constexpr uint64_t storage_subrange = 0x649b0100;
   constexpr uint64_t storage_subrange_size = 0x800;
   constexpr uint64_t sampled_backing = 0x649a3000;
@@ -11265,6 +11945,10 @@ void CheckImageOverlapResolution() {
           "host-backed fill aliased a sampled image on another page");
 
   constexpr uint64_t video_metadata = 0x1020c10000ull;
+  Require("ImageOverlapResolution", "video-out DCC 256/256/0",
+          ClassifyVideoOutCompression(true, video_metadata, 0x48u, 0) ==
+              VideoOutCompression::Dcc256_256_0,
+          "Prospero video-out DCC 256/256/0 mode was rejected");
   Require("ImageOverlapResolution", "video-out DCC 256/64/64",
           ClassifyVideoOutCompression(true, video_metadata, 0x208u, 0) ==
               VideoOutCompression::Dcc256_64_64,
@@ -11290,6 +11974,10 @@ void CheckImageOverlapResolution() {
                   VideoOutCompression::Dcc256_64_64, false, true, false) &&
               !CanUseVideoOutNativeWithoutUpload(
                   VideoOutCompression::Dcc256_64_64, false, false, false) &&
+              CanUseVideoOutNativeWithoutUpload(
+                  VideoOutCompression::Dcc256_256_0, true, false, false) &&
+              !CanUseVideoOutNativeWithoutUpload(
+                  VideoOutCompression::Dcc256_256_0, false, false, true) &&
               !CanUseVideoOutNativeWithoutUpload(
                   VideoOutCompression::Dcc256_64_64, true, false, true) &&
               !CanUseVideoOutNativeWithoutUpload(
@@ -11483,14 +12171,24 @@ void CheckImageOverlapResolution() {
   target.address++;
   Require("ImageOverlapResolution", "render target partial page",
           ClassifyRenderTargetOverlap(sampled, false, true, target) ==
-              RenderTargetOverlap::Unsupported,
-          "partially shared tracker page was retired for a render target");
+              RenderTargetOverlap::RetireSampled,
+          "true byte overlap within a partial tracker page was not retired");
+  target.address = sampled.address + 0x6101;
+  target.size = 0x4000;
+  Require("ImageOverlapResolution", "render target unaligned chance overlap",
+          ClassifyRenderTargetOverlap(sampled, false, true, target) ==
+              RenderTargetOverlap::RetireSampled,
+          "unaligned clean sampled chance overlap was not retired");
   target.address = page_left.address + page_left.size;
   target.size = page_left.size;
   Require("ImageOverlapResolution", "render target shared page",
           ClassifyRenderTargetOverlap(page_left, false, true, target) ==
-              RenderTargetOverlap::Unsupported,
-          "byte-disjoint allocation sharing a tracker page was silently admitted");
+              RenderTargetOverlap::None,
+          "byte-disjoint allocation sharing a tracker page was treated as an alias");
+  Require("ImageOverlapResolution", "sampled render-target shared page",
+          ClassifySampledRenderTargetOverlap(page_left, target, false, true) ==
+              RenderTargetOverlap::None,
+          "reverse byte-disjoint tracker-page relationship was treated as an alias");
   target.address = sampled.address + sampled.size;
   target.size = sampled.size;
   Require("ImageOverlapResolution", "render target adjacent",
@@ -11666,6 +12364,57 @@ void CheckImageOverlapResolution() {
                                ppsa01880_depth) ==
               DepthOverlap::RetireSampled,
           "captured CPU-owned R32F/D32F depth layout was not retired");
+
+  ImageInfo ppsa09477_sampled_depth{};
+  ppsa09477_sampled_depth.address = 0x10adc00000ull;
+  ppsa09477_sampled_depth.size = 0x870000;
+  ppsa09477_sampled_depth.format =
+      Prospero::GpuEnumValue(Prospero::BufferFormat::k32Float);
+  ppsa09477_sampled_depth.width = 1920;
+  ppsa09477_sampled_depth.height = 1080;
+  ppsa09477_sampled_depth.pitch = 2048;
+  ppsa09477_sampled_depth.tile =
+      Prospero::GpuEnumValue(Prospero::TileMode::kDepth);
+  ppsa09477_sampled_depth.type =
+      Prospero::GpuEnumValue(Prospero::ImageType::kColor2D);
+  DepthTargetInfo ppsa09477_depth{};
+  ppsa09477_depth.address = ppsa09477_sampled_depth.address;
+  ppsa09477_depth.size = ppsa09477_sampled_depth.size;
+  ppsa09477_depth.stencil_address = 0x10aec00000ull;
+  ppsa09477_depth.stencil_size = 0x220000;
+  ppsa09477_depth.format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+  ppsa09477_depth.guest_format = ppsa09477_sampled_depth.format;
+  ppsa09477_depth.width = ppsa09477_sampled_depth.width;
+  ppsa09477_depth.height = ppsa09477_sampled_depth.height;
+  ppsa09477_depth.pitch = ppsa09477_sampled_depth.pitch;
+  ppsa09477_depth.bytes_per_element = 4;
+  ppsa09477_depth.tile_mode = ppsa09477_sampled_depth.tile;
+  ppsa09477_depth.stencil_access = true;
+  Require("ImageOverlapResolution", "PPSA09477 disjoint stencil depth load",
+          ClassifyDepthOverlap(ppsa09477_sampled_depth, false,
+                               ppsa09477_depth) ==
+              DepthOverlap::RetireSampled,
+          "captured sampled depth was not preserved beside its disjoint stencil plane");
+  auto ppsa09477_overlapping_stencil = ppsa09477_depth;
+  ppsa09477_overlapping_stencil.stencil_address =
+      ppsa09477_sampled_depth.address + 0x800000;
+  Require("ImageOverlapResolution", "PPSA09477 overlapping stencil guard",
+          ClassifyDepthOverlap(ppsa09477_sampled_depth, false,
+                               ppsa09477_overlapping_stencil) ==
+              DepthOverlap::Unsupported,
+          "sampled depth was retired while also aliasing the stencil plane");
+  auto promoted_d16_sampled = ppsa09477_sampled_depth;
+  promoted_d16_sampled.format =
+      Prospero::GpuEnumValue(Prospero::BufferFormat::k16UNorm);
+  auto promoted_d16_depth = ppsa09477_depth;
+  promoted_d16_depth.guest_format = promoted_d16_sampled.format;
+  promoted_d16_depth.format = VK_FORMAT_D24_UNORM_S8_UINT;
+  promoted_d16_depth.bytes_per_element = 2;
+  Require("ImageOverlapResolution", "promoted D16 native-copy guard",
+          ClassifyDepthOverlap(promoted_d16_sampled, false,
+                               promoted_d16_depth) ==
+              DepthOverlap::Unsupported,
+          "sampled D16 depth was admitted without a native transfer-width match");
   Require("ImageOverlapResolution", "PPSA01880 GPU depth load",
           ClassifyDepthOverlap(ppsa01880_sampled_depth, true,
                                ppsa01880_depth) ==
@@ -12235,8 +12984,8 @@ void CheckHostDmaMetadataReuse() {
               reinterpret_cast<uint32_t *>(memory + 0x1ffc)[0] == 0x11223344,
           "post-clear CPU DMA fill did not publish backing");
   Require("HostDmaMetadataReuse", "identity",
-          texture_cache.HasMetaOverlap(base, metadata_size) &&
-              !texture_cache.IsMetaGpuModified(base, 0x2000) &&
+          texture_cache.QueryRegion(base, metadata_size).metadata_pages &&
+              !texture_cache.QueryRegion(base, 0x2000).gpu_metadata_bytes &&
               VirtualQuery(memory, &protection, sizeof(protection)) != 0 &&
               protection.Protect == PAGE_READWRITE,
           "CPU writes erased metadata identity or retained virtual ownership");
@@ -12341,6 +13090,9 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--image-overlap-only") == 0) {
     CheckImageOverlapResolution();
+    CheckQueryRegionAggregation();
+    VulkanHarness vulkan;
+    vulkan.CheckQueryRegionImageClassification();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--htile-clear-only") == 0) {
@@ -12358,6 +13110,14 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--image-view-only") == 0) {
     CheckSampledColorViews();
+    CheckSampledVideoOutView();
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--image-view-cache-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckRenderTargetViewCache();
+    vulkan.CheckDepthTargetSampledViewCache();
+    vulkan.CheckVideoOutSampledViewCache();
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--sampled-depth-resource-only") == 0) {
@@ -12404,7 +13164,8 @@ int main(int argc, char **argv) {
       std::strcmp(argv[1], "--storage-texture-descriptor-death") == 0) {
     RunStorageTextureDescriptorDeathCase(argv[2]);
   }
-  if (argc == 3 && std::strcmp(argv[1], "--storage-texture-access-death") == 0) {
+  if (argc == 3 &&
+      std::strcmp(argv[1], "--storage-texture-access-death") == 0) {
     RunStorageTextureAccessDeathCase(argv[2]);
   }
   if (argc == 3 && std::strcmp(argv[1], "--meta-overlap-death") == 0) {
@@ -12415,6 +13176,7 @@ int main(int argc, char **argv) {
   }
   CheckReverseRenderTargetFormatContract();
   CheckSampledColorViews();
+  CheckSampledVideoOutView();
   CheckSampledDepthResource();
   CheckSampledDepthDescriptor();
   CheckBufferCacheRangeMerge();
@@ -12432,12 +13194,14 @@ int main(int argc, char **argv) {
   CheckStorageTextureVolumeUploadLayout();
   CheckStorageTextureGpuOwnedRebindState();
   CheckStorageTextureSampledReuse();
+  CheckStorageTextureDepthAlias();
   CheckStorageTextureAccessPermissions();
   CheckMetaOverlapDeaths();
   CheckOverlappingMetadataViews();
   CheckGpuMetadataReuse();
   CheckMetadataReuseDescriptors();
   CheckImageOverlapResolution();
+  CheckQueryRegionAggregation();
   CheckMsaaCompatibility();
   CheckDepthHtileStencilCompatibility();
   CheckStencilAttachmentAccess();
@@ -12454,8 +13218,12 @@ int main(int argc, char **argv) {
   CheckEmbeddedFetchLaneSpill();
   CheckPs5GameExampleImageClearRuntimeShape();
   VulkanHarness vulkan;
+  vulkan.CheckQueryRegionImageClassification();
   vulkan.CheckMutableStorageSrgbView();
   vulkan.CheckMutableRenderTargetBgraStorageView();
+  vulkan.CheckRenderTargetViewCache();
+  vulkan.CheckDepthTargetSampledViewCache();
+  vulkan.CheckVideoOutSampledViewCache();
   const auto tests = MakeCases();
   const auto graphics_tests = MakeGraphicsCases();
   CheckOpcodeCoverage(tests, graphics_tests);

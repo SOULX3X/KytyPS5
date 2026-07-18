@@ -66,15 +66,18 @@ VkSampler SamplerCache::GetSampler(const ShaderSamplerResource& r) {
 	auto to_vk_address_mode = [](uint8_t clamp) {
 		switch (static_cast<Prospero::SamplerClampMode>(clamp)) {
 			case Prospero::SamplerClampMode::kWrap: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-			case Prospero::SamplerClampMode::kMirror: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-			case Prospero::SamplerClampMode::kClampLastTexel: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			case Prospero::SamplerClampMode::kMirror:
+				return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+			case Prospero::SamplerClampMode::kClampLastTexel:
+				return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 			case Prospero::SamplerClampMode::kMirrorOnceLastTexel:
 				return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
 			case Prospero::SamplerClampMode::kClampHalfBorder:
 				return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 			case Prospero::SamplerClampMode::kMirrorOnceHalfBorder:
 				return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
-			case Prospero::SamplerClampMode::kClampBorder: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+			case Prospero::SamplerClampMode::kClampBorder:
+				return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 			case Prospero::SamplerClampMode::kMirrorOnceBorder:
 				return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
 			default: EXIT("unknown clamp: %u\n", clamp);
@@ -87,8 +90,12 @@ VkSampler SamplerCache::GetSampler(const ShaderSamplerResource& r) {
 		case Prospero::SamplerBorderColor::kTransBlack:
 			border = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
 			break;
-		case Prospero::SamplerBorderColor::kOpaqueBlack: border = VK_BORDER_COLOR_INT_OPAQUE_BLACK; break;
-		case Prospero::SamplerBorderColor::kOpaqueWhite: border = VK_BORDER_COLOR_INT_OPAQUE_WHITE; break;
+		case Prospero::SamplerBorderColor::kOpaqueBlack:
+			border = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+			break;
+		case Prospero::SamplerBorderColor::kOpaqueWhite:
+			border = VK_BORDER_COLOR_INT_OPAQUE_WHITE;
+			break;
 		case Prospero::SamplerBorderColor::kFromTable:
 			LOGF(
 			    "temporary: approximating table border color as transparent black, index = %" PRIu16

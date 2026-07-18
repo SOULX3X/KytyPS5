@@ -22,7 +22,7 @@
 
 namespace Libs::Graphics {
 
-//IDK: maybe we can remove it?	
+// IDK: maybe we can remove it?
 constexpr uint32_t kTemporaryPs5BufferFormat121 = 121u;
 
 static bool NarrowInputFormat(VkFormat* format, uint32_t* size, uint32_t used_components) {

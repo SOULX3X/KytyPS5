@@ -59,9 +59,9 @@
 namespace Libs::Graphics {
 
 struct PreparedFrame {
-	VulkanImage                   image {VulkanImageType::Unknown};
+	VulkanImage                    image {VulkanImageType::Unknown};
 	std::unique_ptr<CommandBuffer> present_commands;
-	bool                          busy = false;
+	bool                           busy = false;
 };
 
 class PreparedFramePool {
@@ -154,8 +154,9 @@ static void ConfigurePreparedFrame(PreparedFrame* frame, VkExtent2D extent, VkFo
 		return;
 	}
 	if (dst.image != nullptr) {
+		EXIT_IF(!dst.view_cache.views.empty());
 		VulkanDeleteImage(ctx, &dst, &dst.memory);
-		dst = VulkanImage(VulkanImageType::Unknown);
+		dst.memory = {};
 	}
 
 	dst.extent          = extent;
@@ -384,7 +385,8 @@ static void VulkanRecreateSwapchain() {
 }
 
 static void ValidatePreparedCommand(CommandBuffer* buffer) {
-	if (buffer == nullptr || buffer->IsInvalid() || buffer->GetQueue() != GraphicContext::QUEUE_GFX) {
+	if (buffer == nullptr || buffer->IsInvalid() ||
+	    buffer->GetQueue() != GraphicContext::QUEUE_GFX) {
 		EXIT("prepared frames must be recorded on the graphics queue\n");
 	}
 	EXIT_IF(g_render_ctx == nullptr);

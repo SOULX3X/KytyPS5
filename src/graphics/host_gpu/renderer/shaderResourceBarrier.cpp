@@ -2,8 +2,8 @@
 
 #include "common/assert.h"
 #include "graphics/host_gpu/renderer/descriptorCache.h"
-#include "graphics/shader/shaderBindings.h"
 #include "graphics/shader/shader.h"
+#include "graphics/shader/shaderBindings.h"
 
 #include <cstring>
 

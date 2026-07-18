@@ -163,7 +163,7 @@ void Tiler::TileImage(void* dst, const void* src, const RenderTargetInfo& info) 
 		auto* linear_slice = static_cast<const uint8_t*>(src) + slice_size * layer;
 		if (standard64) {
 			TileConvertLinearToTiledStandard64KB32(guest_slice, linear_slice, info.width,
-			                                        info.height, info.pitch, slice_size);
+			                                       info.height, info.pitch, slice_size);
 		} else {
 			TileConvertLinearToTiledRenderTarget(guest_slice, linear_slice, info.width, info.height,
 			                                     info.pitch, info.bytes_per_element, slice_size);
@@ -172,30 +172,30 @@ void Tiler::TileImage(void* dst, const void* src, const RenderTargetInfo& info) 
 }
 
 void Tiler::TileImage(void* dst, const void* src, const ImageInfo& info) const {
-	const bool image_2d = info.type == Prospero::GpuEnumValue(Prospero::ImageType::kColor2D) &&
-	                      info.depth == 1;
+	const bool image_2d =
+	    info.type == Prospero::GpuEnumValue(Prospero::ImageType::kColor2D) && info.depth == 1;
 	const auto bytes_per_element = Prospero::RenderTargetBytesPerElement(info.format);
 	if (!image_2d || info.levels == 0 || info.levels > 16 ||
 	    info.tile != Prospero::GpuEnumValue(Prospero::TileMode::kRenderTarget) ||
 	    bytes_per_element == 0) {
-		EXIT("Tiler: unsupported storage-texture tile, addr=0x%016" PRIx64
-		     "+0x%016" PRIx64 " extent=%ux%ux%u levels=%u tile=%u format=%u\n",
+		EXIT("Tiler: unsupported storage-texture tile, addr=0x%016" PRIx64 "+0x%016" PRIx64
+		     " extent=%ux%ux%u levels=%u tile=%u format=%u\n",
 		     info.address, info.size, info.width, info.height, info.depth, info.levels, info.tile,
 		     info.format);
 	}
 	auto layout = TextureCalcUploadLayout(info.format, info.width, info.height, info.levels,
 	                                      info.depth, info.pitch, info.tile, info.size, true, false,
 	                                      false, "StorageTextureReadback");
-	auto regions = TextureBuildUploadRegions(
-	    layout, Prospero::SurfaceFormat(info.format), info.width, info.height, info.depth,
-	    info.levels, false, false, TextureUploadDestination::MipLevels,
-	    TextureUploadSliceLayout::MipChainPerSlice);
+	auto regions = TextureBuildUploadRegions(layout, Prospero::SurfaceFormat(info.format),
+	                                         info.width, info.height, info.depth, info.levels,
+	                                         false, false, TextureUploadDestination::MipLevels,
+	                                         TextureUploadSliceLayout::MipChainPerSlice);
 	std::memset(dst, 0, info.size);
 	for (uint32_t level = 0; level < info.levels; level++) {
 		const auto& level_size = layout.level_sizes[level];
-		const auto  guest_offset = level_size.src_size != 0 ? level_size.src_offset
-		                                                   : level_size.offset;
-		auto* guest = static_cast<uint8_t*>(dst) + guest_offset;
+		const auto  guest_offset =
+		    level_size.src_size != 0 ? level_size.src_offset : level_size.offset;
+		auto*       guest  = static_cast<uint8_t*>(dst) + guest_offset;
 		const auto* linear = static_cast<const uint8_t*>(src) + regions[level].offset;
 		TileConvertLinearToTiledRenderTarget(
 		    guest, linear, regions[level].width, regions[level].height, regions[level].pitch,

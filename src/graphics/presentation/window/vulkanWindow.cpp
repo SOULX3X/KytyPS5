@@ -230,7 +230,22 @@ static VulkanQueues VulkanFindQueues(VkPhysicalDevice device, VkSurfaceKHR surfa
 	};
 
 	select_queues(graphics_num, [](const auto& q) { return q.graphics; }, qs.graphics);
-	select_queues(compute_num, [](const auto& q) { return q.compute; }, qs.compute);
+
+	const uint32_t graphics_family =
+	    qs.graphics.empty() ? static_cast<uint32_t>(-1) : qs.graphics.front().family;
+	select_queues(
+	    compute_num,
+	    [graphics_family](const auto& q) { return q.compute && q.family == graphics_family; },
+	    qs.compute);
+	if (compute_num != 0 && qs.compute.empty()) {
+		auto graphics_compute = std::find_if(qs.graphics.begin(), qs.graphics.end(),
+		                                     [](const auto& q) { return q.compute; });
+		if (graphics_compute != qs.graphics.end()) {
+			// Reuse the universal graphics queue when Intel GPUs expose no spare compute queue.
+			qs.compute.push_back(*graphics_compute);
+		}
+	}
+
 	select_queues(transfer_num, [](const auto& q) { return q.transfer; }, qs.transfer);
 	select_queues(present_num, [](const auto& q) { return q.present; }, qs.present);
 
@@ -430,12 +445,6 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface,
 		if (!skip_device && !CheckFormat(device, VK_FORMAT_D16_UNORM, true,
 		                                 VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
 			LOGF("Format VK_FORMAT_D16_UNORM cannot be used as depth buffer\n");
-			skip_device = true;
-		}
-
-		if (!skip_device && !CheckFormat(device, VK_FORMAT_D24_UNORM_S8_UINT, true,
-		                                 VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
-			LOGF("Format VK_FORMAT_D24_UNORM_S8_UINT cannot be used as depth buffer\n");
 			skip_device = true;
 		}
 
@@ -831,7 +840,9 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugMessengerCallback(
 		case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
 			severity_str   = "E";
 			severity_style = Log::Color::BrightRed;
-			error          = true;
+			// Only validation errors are fatal; GENERAL-type errors can come
+			// from unrelated loader/layer issues (e.g. a broken overlay).
+			error = (message_types & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) != 0;
 			break;
 		default: severity_str = "?";
 	}

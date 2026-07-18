@@ -28,8 +28,8 @@ constexpr FormatInfo kFormatInfo[] = {
     {GpuEnumValue(BufferFormat::k16_16UInt), VK_FORMAT_R16G16_UINT, 4, 0, 4, true, true},
     {GpuEnumValue(BufferFormat::k16_16SInt), VK_FORMAT_R16G16_SINT, 4, 0, 4, false, false},
     {GpuEnumValue(BufferFormat::k16_16Float), VK_FORMAT_R16G16_SFLOAT, 4, 0, 4, true, false},
-    {GpuEnumValue(BufferFormat::k11_11_10Float), VK_FORMAT_B10G11R11_UFLOAT_PACK32, 4, 0, 4,
-     true, false},
+    {GpuEnumValue(BufferFormat::k11_11_10Float), VK_FORMAT_B10G11R11_UFLOAT_PACK32, 4, 0, 4, true,
+     false},
     {GpuEnumValue(BufferFormat::k10_10_10_2UNorm), VK_FORMAT_A2B10G10R10_UNORM_PACK32, 4, 0, 4,
      true, false},
     {GpuEnumValue(BufferFormat::k8_8_8_8UNorm), VK_FORMAT_R8G8B8A8_UNORM, 4, 0, 4, true, false},
@@ -50,28 +50,25 @@ constexpr FormatInfo kFormatInfo[] = {
     {GpuEnumValue(BufferFormat::k16_16_16_16Float), VK_FORMAT_R16G16B16A16_SFLOAT, 8, 0, 8, true,
      false},
     {GpuEnumValue(BufferFormat::k32_32_32UInt), VK_FORMAT_R32G32B32_UINT, 12, 0, 12, true, true},
-    {GpuEnumValue(BufferFormat::k32_32_32SInt), VK_FORMAT_R32G32B32_SINT, 12, 0, 12, false,
-     false},
+    {GpuEnumValue(BufferFormat::k32_32_32SInt), VK_FORMAT_R32G32B32_SINT, 12, 0, 12, false, false},
     {GpuEnumValue(BufferFormat::k32_32_32Float), VK_FORMAT_R32G32B32_SFLOAT, 12, 0, 12, true,
      false},
     {GpuEnumValue(BufferFormat::k32_32_32_32UInt), VK_FORMAT_R32G32B32A32_UINT, 16, 0, 16, true,
      true},
     {GpuEnumValue(BufferFormat::k32_32_32_32SInt), VK_FORMAT_R32G32B32A32_SINT, 16, 0, 16, false,
      false},
-    {GpuEnumValue(BufferFormat::k32_32_32_32Float), VK_FORMAT_R32G32B32A32_SFLOAT, 16, 0, 16,
-     true, false},
+    {GpuEnumValue(BufferFormat::k32_32_32_32Float), VK_FORMAT_R32G32B32A32_SFLOAT, 16, 0, 16, true,
+     false},
     {GpuEnumValue(BufferFormat::k8_8_8_8Srgb), VK_FORMAT_R8G8B8A8_SRGB, 4, 0, 4, true, false},
     {GpuEnumValue(BufferFormat::k9_9_9_5Float), VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, 4, 0, 0, true,
      false},
-    {GpuEnumValue(BufferFormat::k5_6_5UNorm), VK_FORMAT_B5G6R5_UNORM_PACK16, 2, 0, 2, true,
-     false},
+    {GpuEnumValue(BufferFormat::k5_6_5UNorm), VK_FORMAT_B5G6R5_UNORM_PACK16, 2, 0, 2, true, false},
     {GpuEnumValue(BufferFormat::k5_5_5_1UNorm), VK_FORMAT_R5G5B5A1_UNORM_PACK16, 2, 0, 2, true,
      false},
     {GpuEnumValue(BufferFormat::k4_4_4_4UNorm), VK_FORMAT_R4G4B4A4_UNORM_PACK16, 2, 0, 2, true,
      false},
     {GpuEnumValue(BufferFormat::kFmask8_S4_F4), VK_FORMAT_R32_SFLOAT, 1, 0, 1, true, false},
-    {GpuEnumValue(BufferFormat::kBc1UNorm), VK_FORMAT_BC1_RGBA_UNORM_BLOCK, 0, 8, 0, true,
-     false},
+    {GpuEnumValue(BufferFormat::kBc1UNorm), VK_FORMAT_BC1_RGBA_UNORM_BLOCK, 0, 8, 0, true, false},
     {GpuEnumValue(BufferFormat::kBc1Srgb), VK_FORMAT_BC1_RGBA_SRGB_BLOCK, 0, 8, 0, true, false},
     {GpuEnumValue(BufferFormat::kBc2UNorm), VK_FORMAT_BC2_UNORM_BLOCK, 0, 16, 0, true, false},
     {GpuEnumValue(BufferFormat::kBc2Srgb), VK_FORMAT_BC2_SRGB_BLOCK, 0, 16, 0, true, false},
@@ -88,7 +85,7 @@ constexpr FormatInfo kFormatInfo[] = {
 };
 
 constexpr auto MakeFormatInfoLookup() {
-	constexpr uint32_t kMaxFormat = GpuEnumValue(BufferFormat::kBc7Srgb);
+	constexpr uint32_t                            kMaxFormat = GpuEnumValue(BufferFormat::kBc7Srgb);
 	std::array<const FormatInfo*, kMaxFormat + 1> lookup {};
 	for (const auto& info: kFormatInfo) {
 		lookup[info.format] = &info;

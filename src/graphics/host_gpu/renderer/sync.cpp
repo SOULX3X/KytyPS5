@@ -1,3 +1,5 @@
+#include "graphics/host_gpu/renderer/sync.h"
+
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/logging/log.h"
@@ -7,7 +9,6 @@
 #include "graphics/host_gpu/renderer/bufferCache.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
-#include "graphics/host_gpu/renderer/sync.h"
 #include "graphics/presentation/displayBuffer.h"
 #include "kernel/eventQueue.h"
 #include "kernel/pthread.h"
@@ -82,8 +83,8 @@ void TriggerEopEvent(uint32_t context_id) {
 	g_render_ctx->TriggerEopEvent(context_id);
 }
 
-void WriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer,
-                                      uint32_t* dst_gpu_addr, uint32_t value) {
+void WriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr,
+                        uint32_t value) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -93,9 +94,8 @@ void WriteAtEndOfPipe32(uint64_t submit_id, CommandBuffer* buffer,
 	                     0, 0, reinterpret_cast<uint64_t>(dst_gpu_addr));
 }
 
-void WriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer* buffer,
-                                         uint32_t* dst_gpu_addr, uint32_t dw_offset,
-                                         uint32_t dw_num) {
+void WriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr,
+                           uint32_t dw_offset, uint32_t dw_num) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -105,8 +105,8 @@ void WriteAtEndOfPipeGds32(uint64_t submit_id, CommandBuffer* buffer,
 	                     dw_offset, dw_num, 0, 0, reinterpret_cast<uint64_t>(dst_gpu_addr));
 }
 
-void WriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer,
-                                      uint64_t* dst_gpu_addr, uint64_t value) {
+void WriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr,
+                        uint64_t value) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -117,8 +117,8 @@ void WriteAtEndOfPipe64(uint64_t submit_id, CommandBuffer* buffer,
 	                     reinterpret_cast<uint64_t>(dst_gpu_addr));
 }
 
-void WriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer,
-                                                uint64_t* dst_gpu_addr, uint64_t value) {
+void WriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer, uint64_t* dst_gpu_addr,
+                                  uint64_t value) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -132,10 +132,8 @@ void WriteAtEndOfPipeClockCounter(uint64_t submit_id, CommandBuffer* buffer,
 	           reinterpret_cast<uint64_t>(dst_gpu_addr), value);
 }
 
-void WriteAtEndOfPipeClockCounterWithWriteBack(uint64_t       submit_id,
-                                                             CommandBuffer* buffer,
-                                                             uint64_t*      dst_gpu_addr,
-                                                             uint64_t       value) {
+void WriteAtEndOfPipeClockCounterWithWriteBack(uint64_t submit_id, CommandBuffer* buffer,
+                                               uint64_t* dst_gpu_addr, uint64_t value) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -150,7 +148,7 @@ void WriteAtEndOfPipeClockCounterWithWriteBack(uint64_t       submit_id,
 }
 
 void WriteAtEndOfPipeWithWriteBack64(uint64_t submit_id, CommandBuffer* buffer,
-                                                   uint64_t* dst_gpu_addr, uint64_t value) {
+                                     uint64_t* dst_gpu_addr, uint64_t value) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -162,7 +160,7 @@ void WriteAtEndOfPipeWithWriteBack64(uint64_t submit_id, CommandBuffer* buffer,
 }
 
 void WriteAtEndOfPipeWithWriteBack32(uint64_t submit_id, CommandBuffer* buffer,
-                                                   uint32_t* dst_gpu_addr, uint32_t value) {
+                                     uint32_t* dst_gpu_addr, uint32_t value) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -172,10 +170,9 @@ void WriteAtEndOfPipeWithWriteBack32(uint64_t submit_id, CommandBuffer* buffer,
 	                     value, 0, 0, reinterpret_cast<uint64_t>(dst_gpu_addr));
 }
 
-void WriteAtEndOfPipeWithInterruptWriteBack64(uint64_t       submit_id,
-                                                            CommandBuffer* buffer,
-                                                            uint64_t* dst_gpu_addr, uint64_t value,
-                                                            uint32_t context_id) {
+void WriteAtEndOfPipeWithInterruptWriteBack64(uint64_t submit_id, CommandBuffer* buffer,
+                                              uint64_t* dst_gpu_addr, uint64_t value,
+                                              uint32_t context_id) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -197,10 +194,9 @@ void WriteAtEndOfPipeWithInterruptWriteBack64(uint64_t       submit_id,
 	    args);
 }
 
-void WriteAtEndOfPipeWithInterruptWriteBack32(uint64_t       submit_id,
-                                                            CommandBuffer* buffer,
-                                                            uint32_t* dst_gpu_addr, uint32_t value,
-                                                            uint32_t context_id) {
+void WriteAtEndOfPipeWithInterruptWriteBack32(uint64_t submit_id, CommandBuffer* buffer,
+                                              uint32_t* dst_gpu_addr, uint32_t value,
+                                              uint32_t context_id) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -221,8 +217,7 @@ void WriteAtEndOfPipeWithInterruptWriteBack32(uint64_t       submit_id,
 }
 
 void WriteAtEndOfPipeWithInterrupt64(uint64_t submit_id, CommandBuffer* buffer,
-                                                   uint64_t* dst_gpu_addr, uint64_t value,
-                                                   uint32_t context_id) {
+                                     uint64_t* dst_gpu_addr, uint64_t value, uint32_t context_id) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -245,8 +240,7 @@ void WriteAtEndOfPipeWithInterrupt64(uint64_t submit_id, CommandBuffer* buffer,
 }
 
 void WriteAtEndOfPipeWithInterrupt32(uint64_t submit_id, CommandBuffer* buffer,
-                                                   uint32_t* dst_gpu_addr, uint32_t value,
-                                                   uint32_t context_id) {
+                                     uint32_t* dst_gpu_addr, uint32_t value, uint32_t context_id) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -266,8 +260,8 @@ void WriteAtEndOfPipeWithInterrupt32(uint64_t submit_id, CommandBuffer* buffer,
 	    args);
 }
 
-uint64_t PrepareDisplayBufferFlip(CommandBuffer* buffer, int handle, int index,
-                                                int flip_mode, int64_t flip_arg) {
+uint64_t PrepareDisplayBufferFlip(CommandBuffer* buffer, int handle, int index, int flip_mode,
+                                  int64_t flip_arg) {
 	for (;;) {
 		uint64_t   request_id = 0;
 		const auto result     = Presentation::DisplayBufferSubmitFlipFromGpu(
@@ -285,9 +279,10 @@ uint64_t PrepareDisplayBufferFlip(CommandBuffer* buffer, int handle, int index,
 	}
 }
 
-void WriteAtEndOfPipeWithInterruptWriteBackFlip32(
-    uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value, int handle,
-    int index, int flip_mode, int64_t flip_arg, uint64_t request_id) {
+void WriteAtEndOfPipeWithInterruptWriteBackFlip32(uint64_t submit_id, CommandBuffer* buffer,
+                                                  uint32_t* dst_gpu_addr, uint32_t value,
+                                                  int handle, int index, int flip_mode,
+                                                  int64_t flip_arg, uint64_t request_id) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -307,10 +302,9 @@ void WriteAtEndOfPipeWithInterruptWriteBackFlip32(
 	    args);
 }
 
-void WriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer* buffer,
-                                              uint32_t* dst_gpu_addr, uint32_t value, int handle,
-                                              int index, int flip_mode, int64_t flip_arg,
-                                              uint64_t request_id) {
+void WriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer* buffer, uint32_t* dst_gpu_addr,
+                                uint32_t value, int handle, int index, int flip_mode,
+                                int64_t flip_arg, uint64_t request_id) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(dst_gpu_addr == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -323,9 +317,8 @@ void WriteAtEndOfPipeWithFlip32(uint64_t submit_id, CommandBuffer* buffer,
 	SubmitLabel(buffer, CompleteDisplayBufferFlip, nullptr, args);
 }
 
-void WriteAtEndOfPipeOnlyFlip(uint64_t submit_id, CommandBuffer* buffer, int handle,
-                                            int index, int flip_mode, int64_t flip_arg,
-                                            uint64_t request_id) {
+void WriteAtEndOfPipeOnlyFlip(uint64_t submit_id, CommandBuffer* buffer, int handle, int index,
+                              int flip_mode, int64_t flip_arg, uint64_t request_id) {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(buffer == nullptr);
 	EXIT_IF(buffer->IsInvalid());

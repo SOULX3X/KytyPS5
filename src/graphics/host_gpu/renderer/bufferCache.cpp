@@ -676,15 +676,15 @@ std::pair<VulkanBuffer*, uint64_t> BufferCache::ObtainBuffer(CommandBuffer*  com
 	const auto      begin = AlignDown(vaddr);
 	const auto      end   = AlignUp(vaddr + size);
 	std::lock_guard transaction(m_resource_mutex);
+	const auto      texture_region = m_texture_cache->QueryRegion(vaddr, size);
 	// Use the stream-buffer fast path before image/buffer alias handling. Clean image and metadata
 	// views may coexist with a small CPU-current read; Kyty's separate image trackers require
 	// GPU-dirty ownership guards here. Read physical backing so
 	// host page protection is irrelevant.
 	if (is_read && !is_written && size <= CACHING_PAGE_SIZE &&
 	    !m_memory_tracker.IsRegionGpuModified(vaddr, size) &&
-	    m_memory_tracker.IsRegionCpuModified(vaddr, size) &&
-	    !m_texture_cache->HasGpuModifiedRangeOverlap(vaddr, size) &&
-	    !m_texture_cache->IsMetaGpuModified(vaddr, size)) {
+	    m_memory_tracker.IsRegionCpuModified(vaddr, size) && !texture_region.gpu_image_bytes &&
+	    !texture_region.gpu_metadata_bytes) {
 		std::array<uint8_t, CACHING_PAGE_SIZE> guest_data;
 		if (Libs::LibKernel::Memory::TryReadBacking(vaddr, guest_data.data(), size)) {
 			VulkanBuffer* stream_buffer    = nullptr;
@@ -697,7 +697,10 @@ std::pair<VulkanBuffer*, uint64_t> BufferCache::ObtainBuffer(CommandBuffer*  com
 			}
 		}
 	}
-	if (m_texture_cache->HasMetaOverlap(begin, end - begin)) {
+	const auto texture_pages = begin == vaddr && end - begin == size
+	                               ? texture_region
+	                               : m_texture_cache->QueryRegion(begin, end - begin);
+	if (texture_pages.metadata_pages) {
 		EXIT("BufferCache: buffer aliases metadata pages, addr=0x%016" PRIx64 " size=0x%016" PRIx64
 		     "\n",
 		     begin, end - begin);
@@ -706,11 +709,10 @@ std::pair<VulkanBuffer*, uint64_t> BufferCache::ObtainBuffer(CommandBuffer*  com
 	// an edge page. Clean read-only buffer and image views may coexist; Kyty retains a hard failure
 	// when either cache owns newer GPU bytes. Writable buffers delegate the ownership transition
 	// to TextureCache, which distinguishes raw texture-data writes from formatted target paths.
-	if (m_texture_cache->HasPageOverlap(begin, end - begin) &&
-	    m_texture_cache->HasRangeOverlap(vaddr, size)) {
+	if (texture_pages.image_pages && texture_region.image_bytes) {
 		const bool coherent_read = is_read && !is_written &&
 		                           !m_memory_tracker.IsRegionGpuModified(vaddr, size) &&
-		                           !m_texture_cache->HasGpuModifiedRangeOverlap(vaddr, size);
+		                           !texture_region.gpu_image_bytes;
 		if (!coherent_read) {
 			if (!is_written) {
 				EXIT("BufferCache: unsupported buffer/image alias, addr=0x%016" PRIx64
@@ -1084,7 +1086,8 @@ void BufferCache::FillBuffer(CommandBuffer* command, GraphicContext* ctx, uint64
 	ValidateGpuAccess(vaddr, size, false, true);
 	{
 		std::lock_guard transaction(m_resource_mutex);
-		const bool      image_overlap       = m_texture_cache->HasRangeOverlap(vaddr, size);
+		const auto      texture_region      = m_texture_cache->QueryRegion(vaddr, size);
+		const bool      image_overlap       = texture_region.image_bytes;
 		const bool      buffer_overlap      = HasPageOverlap(vaddr, size);
 		const bool      buffer_gpu_modified = IsRegionGpuModified(vaddr, size);
 		if (!buffer_overlap && !buffer_gpu_modified) {
@@ -1100,7 +1103,7 @@ void BufferCache::FillBuffer(CommandBuffer* command, GraphicContext* ctx, uint64
 			     " size=0x%016" PRIx64 "\n",
 			     vaddr, size);
 		}
-		if (m_texture_cache->HasMetaRangeOverlap(vaddr, size)) {
+		if (texture_region.metadata_bytes) {
 			LOGF("BufferCache: GPU fill overlaps virtual metadata, addr=0x%016" PRIx64
 			     " size=0x%016" PRIx64 "\n",
 			     vaddr, size);
@@ -1140,16 +1143,18 @@ void BufferCache::CopyBuffer(CommandBuffer* command, GraphicContext* ctx, uint64
 	bool dst_image_transition = false;
 	{
 		std::lock_guard transaction(m_resource_mutex);
-		const bool src_image_gpu = m_texture_cache->HasGpuModifiedRangeOverlap(src_vaddr, size);
-		const bool src_meta      = m_texture_cache->HasMetaRangeOverlap(src_vaddr, size);
-		if (m_texture_cache->HasGpuTargetPageOverlap(src_vaddr, size)) {
+		const auto      src_region    = m_texture_cache->QueryRegion(src_vaddr, size);
+		const auto      dst_region    = m_texture_cache->QueryRegion(dst_vaddr, size);
+		const bool      src_image_gpu = src_region.gpu_image_bytes;
+		const bool      src_meta      = src_region.metadata_bytes;
+		if (src_region.non_sampled_pages) {
 			EXIT("BufferCache: GPU copy aliases target pages, src=0x%016" PRIx64
 			     " dst=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 			     src_vaddr, dst_vaddr, size);
 		}
 		if (!HasPageOverlap(dst_vaddr, size) && !IsRegionGpuModified(src_vaddr, size) &&
 		    !IsRegionGpuModified(dst_vaddr, size) && !src_image_gpu) {
-			if (m_texture_cache->IsMetaGpuModified(src_vaddr, size)) {
+			if (src_region.gpu_metadata_bytes) {
 				LOGF("BufferCache: host copy reads virtual metadata, src=0x%016" PRIx64
 				     " size=0x%016" PRIx64 "\n",
 				     src_vaddr, size);
@@ -1157,7 +1162,7 @@ void BufferCache::CopyBuffer(CommandBuffer* command, GraphicContext* ctx, uint64
 				     "src=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 				     src_vaddr, size);
 			}
-			if (m_texture_cache->HasRangeOverlap(dst_vaddr, size)) {
+			if (dst_region.image_bytes) {
 				m_texture_cache->PrepareHostWrite(dst_vaddr, size);
 			}
 			std::memcpy(reinterpret_cast<void*>(dst_vaddr),
@@ -1169,15 +1174,16 @@ void BufferCache::CopyBuffer(CommandBuffer* command, GraphicContext* ctx, uint64
 			     " dst=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 			     src_vaddr, dst_vaddr, size);
 		}
-		dst_image_transition = m_texture_cache->InvalidateMemoryFromGPU(dst_vaddr, size);
+		dst_image_transition        = m_texture_cache->InvalidateMemoryFromGPU(dst_vaddr, size);
+		const auto transitioned_dst = m_texture_cache->QueryRegion(dst_vaddr, size);
 		// A clean target destination is handled above like a protected host write. Target
 		// aliases that require an actual GPU buffer copy remain unsupported.
-		if (m_texture_cache->HasGpuTargetPageOverlap(dst_vaddr, size)) {
+		if (transitioned_dst.non_sampled_pages) {
 			EXIT("BufferCache: GPU copy aliases target pages, src=0x%016" PRIx64
 			     " dst=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 			     src_vaddr, dst_vaddr, size);
 		}
-		if (src_meta || m_texture_cache->HasMetaRangeOverlap(dst_vaddr, size)) {
+		if (src_meta || transitioned_dst.metadata_bytes) {
 			LOGF("BufferCache: GPU copy overlaps virtual metadata, src=0x%016" PRIx64
 			     " dst=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 			     src_vaddr, dst_vaddr, size);

@@ -405,6 +405,17 @@ public:
 		std::memcpy(dst_data, m_mapped_data, size);
 	}
 
+	void Release(GraphicContext* ctx) {
+		Common::LockGuard lock(m_mutex);
+		if (m_buffer.buffer != nullptr) {
+			EXIT_IF(ctx == nullptr || m_mapped_data == nullptr);
+			VulkanUnmapMemory(ctx, &m_buffer.memory);
+			VulkanDeleteBuffer(ctx, &m_buffer);
+		}
+		m_capacity    = 0;
+		m_mapped_data = nullptr;
+	}
+
 private:
 	template <bool WaitIdle, typename Recorder>
 	void RecordUpload(GraphicContext* ctx, const void* src_data, uint64_t size,
@@ -1076,6 +1087,17 @@ void UtilUploadBuffer(GraphicContext* ctx, StagingBufferType type, VulkanBuffer*
 	EXIT_IF(size == 0);
 	EXIT_IF(dst_offset > dst_buffer->buffer_size || size > dst_buffer->buffer_size - dst_offset);
 	GetStagingBuffer(type)->UploadToBuffer(ctx, dst_buffer, src_data, size, dst_offset);
+}
+
+void UtilReleaseCachedResources(GraphicContext* ctx) {
+	EXIT_IF(ctx == nullptr);
+	g_texture_staging_buffer.Release(ctx);
+	g_vertex_staging_buffer.Release(ctx);
+	g_readback_staging_buffer.Release(ctx);
+	Common::LockGuard lock(g_compressed_image_copy_mutex);
+	if (g_compressed_image_copy_buffer.buffer != nullptr) {
+		VulkanDeleteBuffer(ctx, &g_compressed_image_copy_buffer);
+	}
 }
 
 void UtilCopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t size) {

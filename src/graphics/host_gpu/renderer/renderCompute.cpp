@@ -267,7 +267,8 @@ static bool TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input, cons
 			continue;
 		}
 		if (resource.written || !resource.read || resource.atomic || descriptor.Base48() == 0 ||
-		    descriptor_size == 0 || cache->HasMetaOverlap(descriptor.Base48(), descriptor_size)) {
+		    descriptor_size == 0 ||
+		    cache->QueryRegion(descriptor.Base48(), descriptor_size).metadata_pages) {
 			EXIT("unsupported HTile clear side-buffer access\n");
 		}
 		g_render_ctx->GetBufferCache()->ValidateGpuAccess(descriptor.Base48(), descriptor_size,
@@ -349,9 +350,7 @@ static bool TryConsumeComputeImageClear(const ShaderComputeInputInfo& input, Com
 		return false;
 	}
 	auto* cache = g_render_ctx->GetTextureCache();
-	if (!cache->ClearColorImageFromBuffer(command, descriptor.Base48(), size, packed_clear) &&
-	    !cache->ClearDepthImageFromBuffer(command, descriptor.Base48(), size, packed_clear) &&
-	    !cache->ClearStencilImageFromBuffer(command, descriptor.Base48(), size, packed_clear)) {
+	if (!cache->ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear)) {
 		return false;
 	}
 	static std::atomic<uint32_t> logged_clears {0};

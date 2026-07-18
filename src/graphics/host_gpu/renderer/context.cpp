@@ -40,10 +40,10 @@ public:
 		}
 		return m_pool[id];
 	}
+	void DeleteAll();
 
 private:
 	void Create(int id);
-	void DeleteAll();
 
 	VulkanCommandPool* m_pool[GraphicContext::QUEUES_NUM] = {};
 };
@@ -76,6 +76,12 @@ void GraphicsRenderInit() {
 	EXIT_IF(g_render_ctx != nullptr);
 
 	g_render_ctx = new RenderContext;
+}
+
+void GraphicsRenderReleaseThreadCommandPools() {
+	if (g_render_ctx != nullptr) {
+		g_command_pool.DeleteAll();
+	}
 }
 
 void GraphicsRenderCreateContext() {

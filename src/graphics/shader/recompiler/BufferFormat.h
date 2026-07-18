@@ -18,16 +18,17 @@ enum class ComponentType {
 
 struct BufferFormatInfo {
 	Prospero::BufferFormat format                  = Prospero::BufferFormat::kInvalid;
-	ComponentType   type                    = ComponentType::Unknown;
-	uint32_t        component_count         = 0;
-	uint32_t        byte_size               = 0;
-	uint32_t        component_bits[4]       = {};
-	uint32_t        component_bit_offset[4] = {};
-	bool            packed_bitfield         = false;
+	ComponentType          type                    = ComponentType::Unknown;
+	uint32_t               component_count         = 0;
+	uint32_t               byte_size               = 0;
+	uint32_t               component_bits[4]       = {};
+	uint32_t               component_bit_offset[4] = {};
+	bool                   packed_bitfield         = false;
 };
 
 constexpr Prospero::BufferFormat DecodeTBufferFormat(uint32_t data_format, uint32_t number_format) {
-	return static_cast<Prospero::BufferFormat>(((number_format & 0x7u) << 4u) | (data_format & 0xfu));
+	return static_cast<Prospero::BufferFormat>(((number_format & 0x7u) << 4u) |
+	                                           (data_format & 0xfu));
 }
 
 constexpr ComponentType GetFormatComponentType(Prospero::BufferFormat format) {

@@ -62,6 +62,17 @@ Code contributions should be focused, build successfully on Windows, and include
 where practical. Because KytyPS5 is still evolving quickly, consider opening an issue before
 starting a large change.
 
+### Formatting
+
+Set up the clang-format hook after cloning:
+
+```powershell
+python -m pip install pre-commit
+python -m pre_commit install --install-hooks
+```
+
+It formats staged `.cpp`, `.h`, and `.inc` files in `src`.
+
 ## Developer Information
 
 The PS5 graphics architecture is based on AMD RDNA 2. Use AMD's

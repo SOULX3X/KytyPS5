@@ -11,8 +11,8 @@
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/objects/textureCommon.h"
-#include "graphics/host_gpu/renderer/descriptorCache.h"
 #include "graphics/host_gpu/renderer/debug.h"
+#include "graphics/host_gpu/renderer/descriptorCache.h"
 #include "graphics/host_gpu/renderer/framebufferCache.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -374,11 +374,11 @@ void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 	r->color_clear_enable = false;
 	r->color_clear_value  = {};
 
-	uint32_t width  = 0;
-	uint32_t height = 0;
-	uint32_t pitch  = 0;
-	uint64_t size   = 0;
-	bool     tile   = false;
+	uint32_t   width  = 0;
+	uint32_t   height = 0;
+	uint32_t   pitch  = 0;
+	uint64_t   size   = 0;
+	bool       tile   = false;
 	const bool standard64 =
 	    rt.attrib3.tile_mode == Prospero::GpuEnumValue(Prospero::TileMode::kStandard64KB);
 
@@ -402,9 +402,8 @@ void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 	}
 	if (standard64 &&
 	    (rt.attrib3.dimension != 1 || rt.attrib3.depth != 0 || levels != 1 ||
-	     rt.view.current_mip_level != 0 ||
-	     view.base_layer != 0 || view.image_layers != 1 || rt.attrib.num_samples != 0 ||
-	     rt.attrib.num_fragments != 0 || bytes_per_element != 4 ||
+	     rt.view.current_mip_level != 0 || view.base_layer != 0 || view.image_layers != 1 ||
+	     rt.attrib.num_samples != 0 || rt.attrib.num_fragments != 0 || bytes_per_element != 4 ||
 	     rt.pitch.pitch_div8_minus1 != 0 || (rt.base.addr & 0xffffu) != 0 ||
 	     rt.info.fmask_compression_enable || rt.info.fmask_data_compression_disable ||
 	     rt.info.fmask_one_frag_mode || rt.info.cmask_fast_clear_enable ||
@@ -415,9 +414,8 @@ void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 		     " dimension=%u depth=%u levels=%u layer=%u/%u samples=%u fragments=%u bpe=%u"
 		     " cmask=0x%016" PRIx64 " fmask=0x%016" PRIx64 " dcc=0x%016" PRIx64 "\n",
 		     rt.base.addr, rt.attrib3.dimension, rt.attrib3.depth, levels, view.base_layer,
-		     view.image_layers,
-		     rt.attrib.num_samples, rt.attrib.num_fragments, bytes_per_element, rt.cmask.addr,
-		     rt.fmask.addr, rt.dcc_addr.addr);
+		     view.image_layers, rt.attrib.num_samples, rt.attrib.num_fragments, bytes_per_element,
+		     rt.cmask.addr, rt.fmask.addr, rt.dcc_addr.addr);
 	}
 	if (rt.pitch.pitch_div8_minus1 != 0) {
 		pitch = (rt.pitch.pitch_div8_minus1 + 1u) << 3u;
@@ -438,7 +436,8 @@ void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 		bool          valid_layout = false;
 		if (standard64) {
 			TileGetTextureSize(Prospero::GpuEnumValue(Prospero::BufferFormat::k32Float), width,
-			                   height, pitch, levels, rt.attrib3.tile_mode, &layout, nullptr, nullptr);
+			                   height, pitch, levels, rt.attrib3.tile_mode, &layout, nullptr,
+			                   nullptr);
 			valid_layout = layout.size != 0 && layout.align == 65536;
 		} else {
 			valid_layout =

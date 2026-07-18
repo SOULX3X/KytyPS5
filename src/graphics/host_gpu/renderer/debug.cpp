@@ -5,8 +5,8 @@
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
-#include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/gpu_defs.h"
+#include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 
 #include <atomic>

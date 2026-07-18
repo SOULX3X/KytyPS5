@@ -92,8 +92,7 @@ void UtilCopyImageWithBuffer(CommandBuffer* buffer, GraphicContext* ctx, VulkanI
                              uint64_t dst_layout);
 void UtilBlitPreparedImage(CommandBuffer* buffer, VulkanImage* src_image,
                            VulkanSwapchain* dst_swapchain);
-void UtilClearColorImage(CommandBuffer* buffer, VulkanImage* image,
-                         const VkClearColorValue& color);
+void UtilClearColorImage(CommandBuffer* buffer, VulkanImage* image, const VkClearColorValue& color);
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size,
                    uint32_t src_pitch, uint64_t dst_layout);
 void UtilFillImage(GraphicContext* ctx, DepthStencilVulkanImage* dst_image, const void* src_data,
@@ -110,6 +109,7 @@ void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size,
                     uint64_t src_layout);
 void UtilUploadBuffer(GraphicContext* ctx, StagingBufferType type, VulkanBuffer* dst_buffer,
                       uint64_t dst_offset, const void* src_data, uint64_t size);
+void UtilReleaseCachedResources(GraphicContext* ctx);
 void UtilCopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t size);
 void UtilDownloadBuffer(GraphicContext* ctx, VulkanBuffer* src_buffer, uint64_t src_offset,
                         void* dst_data, uint64_t size);
