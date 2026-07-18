@@ -31,22 +31,6 @@ jobs:
           arch: win64_msvc2022_64
           cache: true
 
-      - name: Install Vulkan SDK
-        shell: powershell
-        run: |
-          Invoke-WebRequest `
-            -Uri "https://sdk.lunarg.com/sdk/download/1.4.335.0/windows/vulkansdk-windows-X64-1.4.335.0.exe" `
-            -OutFile VulkanSDK.exe
-          Start-Process .\VulkanSDK.exe `
-            -ArgumentList "--accept-licenses --default-answer --confirm-command install" `
-            -Wait
-
-      - name: Locate Vulkan SDK
-        shell: powershell
-        run: |
-          $sdk = Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1
-          echo "VULKAN_SDK=$($sdk.FullName)" >> $env:GITHUB_ENV
-
       - name: Verify toolchain
         shell: cmd
         run: |
@@ -55,7 +39,6 @@ jobs:
           ninja --version
           clang-cl --version
           echo Qt6_DIR=%Qt6_DIR%
-          echo VULKAN_SDK=%VULKAN_SDK%
 
       - name: Configure
         shell: cmd
@@ -65,8 +48,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_C_COMPILER=clang-cl ^
             -DCMAKE_CXX_COMPILER=clang-cl ^
-            -DCMAKE_PREFIX_PATH="%Qt6_DIR%" ^
-            -DVULKAN_SDK="%VULKAN_SDK%"
+            -DCMAKE_PREFIX_PATH="%Qt6_DIR%"
 
       - name: Build
         shell: cmd
@@ -83,3 +65,42 @@ jobs:
         with:
           name: KytyPS5
           path: _Build/windows/install/**
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: KytyPS5
+          path: KytyPS5
+
+      - name: Set release name
+        shell: bash
+        run: |
+          echo "RELEASE_NAME=KytyPS5-$(date -u +'%Y-%m-%d')-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Package build
+        shell: bash
+        run: zip -r "$RELEASE_NAME.zip" KytyPS5
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_NAME" "$RELEASE_NAME.zip" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_NAME" "$RELEASE_NAME.zip" \
+              --generate-notes \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_NAME"
+          fi
