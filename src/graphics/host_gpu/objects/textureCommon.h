@@ -5,7 +5,7 @@
 #include "common/common.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/tile.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <vector>
@@ -14,7 +14,6 @@ namespace Libs::Graphics {
 
 struct GraphicContext;
 struct VulkanImage;
-struct VulkanMemory;
 
 enum class TextureFormatUsage : uint32_t {
 	None    = 0,
@@ -93,7 +92,7 @@ bool                 TextureCheckFormat(GraphicContext* ctx, vk::ImageCreateInfo
 bool TextureCheckStorageSwizzle(vk::ImageCreateInfo* image_info, vk::ComponentMapping* components);
 vk::ImageUsageFlags    TextureGetUsage(TextureFormatUsage usage);
 vk::ImageUsageFlags    TextureGetViewUsage(TextureFormatUsage usage);
-vk::Format             TextureGetFormat(uint32_t fmt, TextureFormatUsage usage);
+vk::Format             TextureGetFormat(uint32_t fmt);
 RenderTargetFormatInfo TextureGetRenderTargetFormat(uint32_t layout, uint32_t type, uint32_t order);
 uint32_t TextureGetAtlasSliceYStride(vk::Format format, uint32_t mip_height, uint32_t depth,
                                      uint64_t levels);
@@ -105,7 +104,7 @@ bool     TextureIs3DTexture(uint64_t type);
 bool     TextureIsCubeTexture(uint64_t type);
 bool     TextureIsLayeredTexture(uint64_t type);
 bool     TextureCanCreateCubeView(uint64_t type, uint32_t base_array, uint32_t layer_count);
-vk::ComponentMapping TextureCreateImage(GraphicContext* ctx, VulkanImage* vk_obj, VulkanMemory* mem,
+vk::ComponentMapping TextureCreateImage(GraphicContext* ctx, VulkanImage* image,
                                         const TextureImageCreateParams& params);
 void TextureCreateImageViews(GraphicContext* ctx, VulkanImage* vk_obj,
                              vk::ComponentMapping components, uint64_t type, uint32_t base_array,
@@ -128,7 +127,8 @@ std::vector<BufferImageCopy> TextureBuildUploadRegions(
     uint32_t depth, uint64_t levels, bool array_texture, bool volume_texture,
     TextureUploadDestination destination, TextureUploadSliceLayout slice_layout);
 void TextureCopyBufferBytes(GraphicContext* ctx, VulkanBuffer* src_buffer,
-                            uint64_t src_buffer_offset, uint64_t copy_size, UtilScratchBuffer* dst);
+                            uint64_t src_buffer_offset, uint64_t copy_size,
+                            Transfer::ScratchBuffer* dst);
 void TextureUploadGuestImage(GraphicContext* ctx, VulkanImage* vk_obj, const void* src_data,
                              uint64_t size, const std::vector<BufferImageCopy>& regions,
                              const TextureUploadLayout& layout, uint32_t fmt, uint64_t width,

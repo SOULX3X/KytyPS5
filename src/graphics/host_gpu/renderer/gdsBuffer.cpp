@@ -1,7 +1,7 @@
 #include "graphics/host_gpu/renderer/gdsBuffer.h"
 
 #include "common/assert.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vma.h"
 
 namespace Libs::Graphics {

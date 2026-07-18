@@ -69,7 +69,7 @@ private:
 class CommandBuffer {
 public:
 	explicit CommandBuffer(int queue): m_queue(queue) { Allocate(); }
-	virtual ~CommandBuffer() { Free(); }
+	~CommandBuffer() { Free(); }
 
 	KYTY_CLASS_NO_COPY(CommandBuffer);
 
@@ -95,16 +95,21 @@ public:
 	void RetainResourceUntilFence(std::shared_ptr<void> resource);
 	void RecycleDescriptorAfterFence(VulkanDescriptorSet* set);
 
-	[[nodiscard]] uint32_t GetIndex() const { return m_index; }
-	[[nodiscard]] int      GetQueue() const { return m_queue; }
-	VulkanCommandPool*     GetPool() { return m_pool; }
-	[[nodiscard]] bool     IsExecute() const { return m_execute; }
+	[[nodiscard]] vk::CommandBuffer Handle() const;
+	[[nodiscard]] int               GetQueue() const { return m_queue; }
+	[[nodiscard]] bool              IsExecute() const { return m_execute; }
 	[[nodiscard]] uint64_t GetRecordingGeneration() const { return m_recording_generation; }
 
 private:
 	friend class BufferCache;
 
-	void RecycleDescriptorsAfterFence();
+	void Submit(vk::Semaphore wait_semaphore, vk::PipelineStageFlags wait_stage,
+	            vk::Semaphore signal_semaphore);
+	[[nodiscard]] vk::Semaphore ResolveSignalSemaphore(vk::Semaphore semaphore) const;
+	void                        FinalizeFence(bool reset_recording);
+	void                        ReleaseResourcesAfterFence();
+	void                        DeleteBuffersAfterFence();
+	void                        RecycleDescriptorsAfterFence();
 
 	VulkanCommandPool*                m_pool                 = nullptr;
 	uint32_t                          m_index                = static_cast<uint32_t>(-1);

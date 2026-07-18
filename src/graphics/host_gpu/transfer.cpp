@@ -1,10 +1,11 @@
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/imageView.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vma.h"
@@ -16,7 +17,7 @@
 #include <span>
 #include <vector>
 
-namespace Libs::Graphics {
+namespace Libs::Graphics::Transfer {
 
 static Common::Mutex              g_scratch_buffer_mutex;
 static std::unique_ptr<uint8_t[]> g_scratch_buffer;
@@ -43,7 +44,7 @@ std::vector<ImageBufferCopy> MakeLayeredImageBufferCopies(uint32_t layers, uint6
 	return regions;
 }
 
-UtilScratchBuffer::UtilScratchBuffer(uint64_t size) {
+ScratchBuffer::ScratchBuffer(uint64_t size) {
 	EXIT_IF(size == 0);
 
 	g_scratch_buffer_mutex.Lock();
@@ -56,11 +57,11 @@ UtilScratchBuffer::UtilScratchBuffer(uint64_t size) {
 	m_data = g_scratch_buffer.get();
 }
 
-UtilScratchBuffer::~UtilScratchBuffer() {
+ScratchBuffer::~ScratchBuffer() {
 	g_scratch_buffer_mutex.Unlock();
 }
 
-bool UtilBufferIsTiled(uint64_t vaddr, uint64_t size) {
+bool GuestBufferIsTiled(uint64_t vaddr, uint64_t size) {
 	if ((size & 0x7u) == 0) {
 		if (size == 0) {
 			return false;
@@ -80,7 +81,7 @@ bool UtilBufferIsTiled(uint64_t vaddr, uint64_t size) {
 	return true;
 }
 
-void VulkanDeviceWaitIdle(GraphicContext* ctx) {
+void WaitForGraphicsIdle(GraphicContext* ctx) {
 	Common::Mutex* locked[GraphicContext::QUEUES_NUM] {};
 	int            locked_num = 0;
 
@@ -117,64 +118,17 @@ void VulkanDeviceWaitIdle(GraphicContext* ctx) {
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 }
 
-void UtilResetImageViews(VulkanImage* image) {
-	for (auto& view: image->image_view) {
-		view = nullptr;
-	}
-}
-
-void UtilCreateImageView(GraphicContext* ctx, VulkanImage* image, int view_index,
-                         vk::ImageViewType view_type, vk::ImageAspectFlags aspect_mask,
-                         vk::ComponentMapping components, uint32_t base_array_layer,
-                         uint32_t base_mip_level, uint32_t layer_count, uint32_t level_count,
-                         vk::Format view_format, vk::ImageUsageFlags view_usage) {
-	if (view_index < 0 || view_index >= VulkanImage::VIEW_MAX || image->image == nullptr ||
-	    image->image_view[view_index] != nullptr) {
-		EXIT("invalid image-view creation target: image=%p index=%d current_view=%d\n",
-		     static_cast<const void*>(image), view_index,
-		     view_index >= 0 && view_index < VulkanImage::VIEW_MAX &&
-		         image->image_view[view_index] != nullptr);
-	}
-
-	vk::ImageViewUsageCreateInfo usage_info {};
-	usage_info.sType = vk::StructureType::eImageViewUsageCreateInfo;
-	usage_info.pNext = nullptr;
-	usage_info.usage = view_usage;
-
-	vk::ImageViewCreateInfo create_info {};
-	create_info.sType      = vk::StructureType::eImageViewCreateInfo;
-	create_info.pNext      = (view_usage ? &usage_info : nullptr);
-	create_info.flags      = {};
-	create_info.image      = image->image;
-	create_info.viewType   = view_type;
-	create_info.format     = (view_format != vk::Format::eUndefined ? view_format : image->format);
-	create_info.components = components;
-	create_info.subresourceRange.aspectMask     = aspect_mask;
-	create_info.subresourceRange.baseArrayLayer = base_array_layer;
-	create_info.subresourceRange.baseMipLevel   = base_mip_level;
-	create_info.subresourceRange.layerCount     = layer_count;
-	create_info.subresourceRange.levelCount     = level_count;
-
-	const auto result =
-	    ctx->device.createImageView(&create_info, nullptr, &image->image_view[view_index]);
-	if (result != vk::Result::eSuccess || image->image_view[view_index] == nullptr) {
-		EXIT("failed to create image view: result=%d image_format=%d view_format=%d index=%d\n",
-		     static_cast<int>(result), static_cast<int>(image->format),
-		     static_cast<int>(create_info.format), view_index);
-	}
-}
-
 static void SetImageLayout(vk::CommandBuffer buffer, VulkanImage* dst_image, uint32_t base_level,
                            uint32_t levels, vk::ImageAspectFlags aspect_mask,
                            vk::ImageLayout old_image_layout, vk::ImageLayout new_image_layout);
 
 template <typename Recorder>
-static void ExecuteImmediateUtilCommands(const Recorder& recorder) {
+static void ExecuteImmediateCommands(const Recorder& recorder) {
 	// Keep synchronous utility submission behind one boundary so adopting a central scheduler does
 	// not touch every caller.
 	CommandBuffer command(GraphicContext::QUEUE_UTIL);
 	command.Begin();
-	recorder(&command, command.GetPool()->buffers[command.GetIndex()]);
+	recorder(&command, command.Handle());
 	command.End();
 	command.Execute();
 	command.WaitForFence();
@@ -220,18 +174,6 @@ static void SetBufferMemoryBarrier(vk::CommandBuffer command, vk::Buffer buffer,
 	                        0, nullptr);
 }
 
-[[nodiscard]] static vk::ImageAspectFlags GetDepthStencilAspects(vk::Format format) {
-	switch (format) {
-		case vk::Format::eD16Unorm:
-		case vk::Format::eD32Sfloat: return vk::ImageAspectFlagBits::eDepth;
-		case vk::Format::eD16UnormS8Uint:
-		case vk::Format::eD24UnormS8Uint:
-		case vk::Format::eD32SfloatS8Uint:
-			return vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
-		default: EXIT("unsupported depth/stencil image format: %d\n", static_cast<int>(format));
-	}
-}
-
 [[nodiscard]] static vk::ImageAspectFlags GetTransferAspects(const VulkanImage&   image,
                                                              vk::ImageAspectFlags copy_aspect) {
 	if (copy_aspect == vk::ImageAspectFlagBits::eColor) {
@@ -239,7 +181,7 @@ static void SetBufferMemoryBarrier(vk::CommandBuffer command, vk::Buffer buffer,
 	}
 	if (copy_aspect == vk::ImageAspectFlagBits::eDepth ||
 	    copy_aspect == vk::ImageAspectFlagBits::eStencil) {
-		const auto aspects = GetDepthStencilAspects(image.format);
+		const auto aspects = ImageViewOps::DepthAspectMask(image.format);
 		if (!(copy_aspect & aspects)) {
 			EXIT("image transfer aspect is unavailable: format=%d copy=0x%x available=0x%x\n",
 			     static_cast<int>(image.format),
@@ -257,7 +199,7 @@ static void RecordBufferToImageCopy(CommandBuffer& command, VulkanBuffer& src_bu
                                     std::span<const vk::BufferImageCopy> regions,
                                     vk::ImageAspectFlags                 transition_aspects,
                                     vk::ImageLayout initial_layout, vk::ImageLayout final_layout) {
-	auto vk_command = command.GetPool()->buffers[command.GetIndex()];
+	auto vk_command = command.Handle();
 	SetBufferMemoryBarrier(vk_command, src_buffer.buffer, 0, VK_WHOLE_SIZE,
 	                       vk::AccessFlagBits::eMemoryWrite, vk::AccessFlagBits::eTransferRead,
 	                       vk::PipelineStageFlagBits::eAllCommands,
@@ -301,7 +243,7 @@ ConvertImageBufferCopies(std::span<const ImageBufferCopy> regions) {
 static void RecordImageToBuffer(CommandBuffer& command, VulkanImage& src_image,
                                 VulkanBuffer& dst_buffer, std::span<const ImageBufferCopy> regions,
                                 vk::ImageLayout final_layout) {
-	auto                 vk_command = command.GetPool()->buffers[command.GetIndex()];
+	auto                 vk_command = command.Handle();
 	vk::ImageAspectFlags aspects    = {};
 	for (const auto& region: regions) {
 		aspects |= GetTransferAspects(src_image, region.aspect);
@@ -399,7 +341,7 @@ public:
 
 		EnsureBuffer(ctx, size, vk::BufferUsageFlagBits::eTransferDst);
 
-		ExecuteImmediateUtilCommands([&](CommandBuffer* command, vk::CommandBuffer) {
+		ExecuteImmediateCommands([&](CommandBuffer* command, vk::CommandBuffer) {
 			RecordImageToBuffer(*command, *src_image, m_buffer, dst_pitch, src_layout, aspect);
 		});
 
@@ -411,7 +353,7 @@ public:
 	                       vk::ImageLayout src_layout) {
 		Common::LockGuard lock(m_mutex);
 		EnsureBuffer(ctx, size, vk::BufferUsageFlagBits::eTransferDst);
-		ExecuteImmediateUtilCommands([&](CommandBuffer* command, vk::CommandBuffer) {
+		ExecuteImmediateCommands([&](CommandBuffer* command, vk::CommandBuffer) {
 			RecordImageToBuffer(*command, *src_image, m_buffer, regions, src_layout);
 		});
 		std::memcpy(dst_data, m_mapped_data, size);
@@ -435,9 +377,9 @@ private:
 		Common::LockGuard lock(m_mutex);
 		CopyFromHost(ctx, src_data, size, vk::BufferUsageFlagBits::eTransferSrc);
 		if constexpr (WaitIdle) {
-			VulkanDeviceWaitIdle(ctx);
+			WaitForGraphicsIdle(ctx);
 		}
-		ExecuteImmediateUtilCommands(recorder);
+		ExecuteImmediateCommands(recorder);
 	}
 
 	void CopyFromHost(GraphicContext* ctx, const void* src_data, uint64_t size,
@@ -476,10 +418,7 @@ static ReusableStagingBuffer g_texture_staging_buffer;
 static ReusableStagingBuffer g_vertex_staging_buffer;
 static ReusableStagingBuffer g_readback_staging_buffer;
 
-static Common::Mutex g_compressed_image_copy_mutex;
-static VulkanBuffer  g_compressed_image_copy_buffer;
-
-bool UtilIsBcFormat(vk::Format format) {
+bool IsBlockCompressedFormat(vk::Format format) {
 	return format == vk::Format::eBc1RgbUnormBlock || format == vk::Format::eBc1RgbSrgbBlock ||
 	       format == vk::Format::eBc1RgbaUnormBlock || format == vk::Format::eBc1RgbaSrgbBlock ||
 	       format == vk::Format::eBc2UnormBlock || format == vk::Format::eBc2SrgbBlock ||
@@ -490,7 +429,7 @@ bool UtilIsBcFormat(vk::Format format) {
 	       format == vk::Format::eBc7UnormBlock || format == vk::Format::eBc7SrgbBlock;
 }
 
-uint32_t UtilGetBcBlockSize(vk::Format format) {
+uint32_t BlockCompressedBytesPerBlock(vk::Format format) {
 	switch (format) {
 		case vk::Format::eBc1RgbUnormBlock:
 		case vk::Format::eBc1RgbSrgbBlock:
@@ -522,24 +461,6 @@ static uint32_t GetFormatTexelSize(vk::Format format) {
 	}
 }
 
-static VulkanBuffer* GetCompressedImageCopyBuffer(GraphicContext* ctx, uint64_t size) {
-	EXIT_IF(size == 0);
-
-	constexpr uint64_t buffer_size = 64ull * 1024ull * 1024ull;
-	EXIT_NOT_IMPLEMENTED(size > buffer_size);
-
-	Common::LockGuard lock(g_compressed_image_copy_mutex);
-
-	if (g_compressed_image_copy_buffer.buffer == nullptr) {
-		g_compressed_image_copy_buffer.usage =
-		    vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst;
-		g_compressed_image_copy_buffer.memory.property = {};
-		VulkanCreateBuffer(ctx, buffer_size, &g_compressed_image_copy_buffer);
-	}
-
-	return &g_compressed_image_copy_buffer;
-}
-
 static ReusableStagingBuffer* GetStagingBuffer(StagingBufferType type) {
 	switch (type) {
 		case StagingBufferType::Texture: return &g_texture_staging_buffer;
@@ -549,6 +470,13 @@ static ReusableStagingBuffer* GetStagingBuffer(StagingBufferType type) {
 	}
 
 	return nullptr;
+}
+
+void ReleaseCachedResources(GraphicContext* ctx) {
+	EXIT_IF(ctx == nullptr);
+	g_texture_staging_buffer.Release(ctx);
+	g_vertex_staging_buffer.Release(ctx);
+	g_readback_staging_buffer.Release(ctx);
 }
 
 static void SetImageLayout(vk::CommandBuffer buffer, VulkanImage* dst_image, uint32_t base_level,
@@ -662,28 +590,35 @@ static void SetImageLayout(vk::CommandBuffer buffer, VulkanImage* dst_image, uin
 	dst_image->layout = new_image_layout;
 }
 
-static bool CopyBlockImageToCompressedImage(vk::CommandBuffer vk_buffer, const ImageImageCopy& r,
-                                            VulkanImage* dst_image) {
+static uint64_t CompressedImageCopyBufferSize(const ImageImageCopy& r,
+                                              const VulkanImage&    dst_image) {
 	if (r.src_aspect != vk::ImageAspectFlagBits::eColor ||
-	    r.dst_aspect != vk::ImageAspectFlagBits::eColor || !UtilIsBcFormat(dst_image->format)) {
-		return false;
+	    r.dst_aspect != vk::ImageAspectFlagBits::eColor ||
+	    !IsBlockCompressedFormat(dst_image.format)) {
+		return 0;
 	}
 
 	auto src_texel_size = GetFormatTexelSize(r.src_image->format);
-	auto dst_block_size = UtilGetBcBlockSize(dst_image->format);
+	auto dst_block_size = BlockCompressedBytesPerBlock(dst_image.format);
 	if (src_texel_size == 0 || src_texel_size != dst_block_size) {
-		return false;
+		return 0;
 	}
 
 	auto block_width  = (r.width + 3u) / 4u;
 	auto block_height = (r.height + 3u) / 4u;
 	if (block_width > r.src_image->extent.width || block_height > r.src_image->extent.height) {
-		return false;
+		return 0;
 	}
+	return static_cast<uint64_t>(block_width) * block_height * dst_block_size;
+}
 
-	auto* ctx         = WindowGetGraphicContext();
-	auto* copy_buffer = GetCompressedImageCopyBuffer(ctx, static_cast<uint64_t>(block_width) *
-	                                                          block_height * dst_block_size);
+static void CopyBlockImageToCompressedImage(vk::CommandBuffer vk_buffer, const ImageImageCopy& r,
+                                            VulkanImage* dst_image, VulkanBuffer* copy_buffer) {
+	const auto copy_size = CompressedImageCopyBufferSize(r, *dst_image);
+	EXIT_IF(copy_size == 0 || copy_buffer == nullptr || copy_buffer->buffer_size < copy_size);
+
+	const auto block_width  = (r.width + 3u) / 4u;
+	const auto block_height = (r.height + 3u) / 4u;
 
 	const auto src_region =
 	    MakeBufferImageCopy(0, 0, vk::ImageAspectFlagBits::eColor, r.src_level, r.src_layer,
@@ -713,13 +648,11 @@ static bool CopyBlockImageToCompressedImage(vk::CommandBuffer vk_buffer, const I
 
 	SetImageLayout(vk_buffer, r.src_image, r.src_level, 1, vk::ImageAspectFlagBits::eColor,
 	               vk::ImageLayout::eTransferSrcOptimal, src_layout);
-
-	return true;
 }
 
-void UtilImageToImage(CommandBuffer* buffer, std::span<const ImageImageCopy> regions,
-                      VulkanImage* dst_image, vk::ImageLayout dst_layout) {
-	auto vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+void CopyImage(CommandBuffer* buffer, std::span<const ImageImageCopy> regions,
+               VulkanImage* dst_image, vk::ImageLayout dst_layout) {
+	auto vk_buffer = buffer->Handle();
 
 	bool                 same_image_copy        = false;
 	vk::ImageAspectFlags dst_transition_aspects = {};
@@ -777,15 +710,28 @@ void UtilImageToImage(CommandBuffer* buffer, std::span<const ImageImageCopy> reg
 
 	SetImageLayout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, dst_transition_aspects,
 	               dst_image->layout, vk::ImageLayout::eTransferDstOptimal);
+	uint64_t compressed_copy_size = 0;
+	for (const auto& r: regions) {
+		compressed_copy_size =
+		    std::max(compressed_copy_size, CompressedImageCopyBufferSize(r, *dst_image));
+	}
+	VulkanBuffer* compressed_copy_buffer = nullptr;
+	if (compressed_copy_size != 0) {
+		compressed_copy_buffer = new VulkanBuffer;
+		compressed_copy_buffer->usage =
+		    vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst;
+		compressed_copy_buffer->memory.property = {};
+		VulkanCreateBuffer(WindowGetGraphicContext(), compressed_copy_size, compressed_copy_buffer);
+		buffer->DeleteAfterFence(compressed_copy_buffer);
+	}
 
 	for (const auto& r: regions) {
 		vk::ImageCopy region;
 
 		auto src_layout = r.src_image->layout;
 
-		if (r.src_aspect == vk::ImageAspectFlagBits::eColor &&
-		    r.dst_aspect == vk::ImageAspectFlagBits::eColor &&
-		    CopyBlockImageToCompressedImage(vk_buffer, r, dst_image)) {
+		if (CompressedImageCopyBufferSize(r, *dst_image) != 0) {
+			CopyBlockImageToCompressedImage(vk_buffer, r, dst_image, compressed_copy_buffer);
 			continue;
 		}
 
@@ -817,10 +763,10 @@ void UtilImageToImage(CommandBuffer* buffer, std::span<const ImageImageCopy> reg
 	               vk::ImageLayout::eTransferDstOptimal, dst_layout);
 }
 
-void UtilCopyImageWithBuffer(CommandBuffer* buffer, GraphicContext* ctx, VulkanImage* src_image,
-                             vk::ImageAspectFlags src_aspect, VulkanImage* dst_image,
-                             vk::ImageAspectFlags dst_aspect, uint32_t bytes_per_element,
-                             vk::ImageLayout dst_layout) {
+void CopyImageViaBuffer(CommandBuffer* buffer, GraphicContext* ctx, VulkanImage* src_image,
+                        vk::ImageAspectFlags src_aspect, VulkanImage* dst_image,
+                        vk::ImageAspectFlags dst_aspect, uint32_t bytes_per_element,
+                        vk::ImageLayout dst_layout) {
 	if (!IsSingleImageAspect(src_aspect) || !IsSingleImageAspect(dst_aspect) ||
 	    (bytes_per_element != 2 && bytes_per_element != 4) || src_image->layers != 1 ||
 	    dst_image->layers != 1 || src_image->mip_levels != 1 || dst_image->mip_levels != 1 ||
@@ -849,7 +795,7 @@ void UtilCopyImageWithBuffer(CommandBuffer* buffer, GraphicContext* ctx, VulkanI
 	// recording the recreate copy; commands already recorded on this buffer remain ordered by the
 	// barriers below. The preservation policy stays isolated here so a future scheduler can replace
 	// this synchronization without changing texture-cache ownership logic.
-	VulkanDeviceWaitIdle(ctx);
+	WaitForGraphicsIdle(ctx);
 	auto* copy_buffer = new VulkanBuffer;
 	copy_buffer->usage =
 	    vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst;
@@ -857,7 +803,7 @@ void UtilCopyImageWithBuffer(CommandBuffer* buffer, GraphicContext* ctx, VulkanI
 	VulkanCreateBuffer(ctx, copy_buffer_size, copy_buffer);
 	buffer->DeleteAfterFence(copy_buffer);
 
-	auto       vk_buffer    = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto       vk_buffer    = buffer->Handle();
 	const auto src_layout   = src_image->layout;
 	const auto final_layout = dst_layout;
 	SetImageLayout(vk_buffer, src_image, 0, 1, src_aspect, src_layout,
@@ -894,9 +840,9 @@ void UtilCopyImageWithBuffer(CommandBuffer* buffer, GraphicContext* ctx, VulkanI
 	               final_layout);
 }
 
-void UtilBlitPreparedImage(CommandBuffer* buffer, VulkanImage* src_image,
-                           VulkanSwapchain* dst_swapchain) {
-	auto vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+void BlitToSwapchain(CommandBuffer* buffer, VulkanImage* src_image,
+                     VulkanSwapchain* dst_swapchain) {
+	auto vk_buffer = buffer->Handle();
 	if (src_image->layout != vk::ImageLayout::eTransferSrcOptimal) {
 		EXIT("invalid prepared presentation image, image=%p vk_image=%p layout=%d\n",
 		     static_cast<const void*>(src_image),
@@ -939,9 +885,8 @@ void UtilBlitPreparedImage(CommandBuffer* buffer, VulkanImage* src_image,
 	                    vk::Filter::eLinear);
 }
 
-void UtilClearColorImage(CommandBuffer* buffer, VulkanImage* image,
-                         const vk::ClearColorValue& color) {
-	auto vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+void ClearColorImage(CommandBuffer* buffer, VulkanImage* image, const vk::ClearColorValue& color) {
+	auto vk_buffer = buffer->Handle();
 	SetImageLayout(vk_buffer, image, 0, 1, vk::ImageAspectFlagBits::eColor, image->layout,
 	               vk::ImageLayout::eTransferDstOptimal);
 	const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
@@ -951,105 +896,8 @@ void UtilClearColorImage(CommandBuffer* buffer, VulkanImage* image,
 	               vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eTransferSrcOptimal);
 }
 
-void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffer) {
-	KYTY_PROFILER_FUNCTION();
-
-	EXIT_IF(buffer->buffer != nullptr);
-
-	vk::BufferCreateInfo buffer_info {};
-	buffer_info.sType       = vk::StructureType::eBufferCreateInfo;
-	buffer_info.size        = size;
-	buffer_info.usage       = buffer->usage;
-	buffer_info.sharingMode = vk::SharingMode::eExclusive;
-
-	VmaAllocationCreateInfo alloc_info {};
-	alloc_info.requiredFlags =
-	    static_cast<vk::MemoryPropertyFlags::MaskType>(buffer->memory.property);
-
-	vk::Buffer::CType native_buffer = VK_NULL_HANDLE;
-	const auto        result        = static_cast<vk::Result>(vmaCreateBuffer(
-	    gctx->allocator, static_cast<const vk::BufferCreateInfo::NativeType*>(buffer_info),
-	    &alloc_info, &native_buffer, &buffer->memory.allocation, &buffer->memory.allocation_info));
-	buffer->buffer                  = native_buffer;
-	if (result != vk::Result::eSuccess) {
-		VulkanLogMemoryBudget(gctx);
-	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-
-	gctx->device.getBufferMemoryRequirements(buffer->buffer, &buffer->memory.requirements);
-
-	buffer->memory.type      = buffer->memory.allocation_info.memoryType;
-	buffer->memory.memory    = buffer->memory.allocation_info.deviceMemory;
-	buffer->memory.offset    = buffer->memory.allocation_info.offset;
-	buffer->memory.unique_id = VulkanNextMemoryUniqueId();
-	buffer->buffer_size      = size;
-
-	VulkanTrackAllocation(&buffer->memory);
-}
-
-void VulkanDeleteBuffer(GraphicContext* gctx, VulkanBuffer* buffer) {
-	KYTY_PROFILER_FUNCTION();
-
-	EXIT_IF(buffer->memory.allocation == nullptr);
-
-	VulkanUntrackAllocation(&buffer->memory);
-	vmaDestroyBuffer(gctx->allocator, buffer->buffer, buffer->memory.allocation);
-	buffer->buffer                 = nullptr;
-	buffer->memory.memory          = nullptr;
-	buffer->memory.allocation      = nullptr;
-	buffer->memory.allocation_info = {};
-	buffer->memory.offset          = 0;
-}
-
-bool VulkanCreateImage(GraphicContext* gctx, const vk::ImageCreateInfo* image_info,
-                       VulkanImage* image, VulkanMemory* memory) {
-	KYTY_PROFILER_FUNCTION();
-
-	EXIT_IF(image->image != nullptr);
-	EXIT_IF(memory->allocation != nullptr);
-
-	VmaAllocationCreateInfo alloc_info {};
-	alloc_info.requiredFlags = static_cast<vk::MemoryPropertyFlags::MaskType>(memory->property);
-
-	vk::Image::CType native_image = VK_NULL_HANDLE;
-	const auto       result       = static_cast<vk::Result>(vmaCreateImage(
-	    gctx->allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(*image_info),
-	    &alloc_info, &native_image, &memory->allocation, &memory->allocation_info));
-	image->image                  = native_image;
-
-	if (result != vk::Result::eSuccess) {
-		VulkanLogMemoryBudget(gctx);
-		return false;
-	}
-
-	gctx->device.getImageMemoryRequirements(image->image, &memory->requirements);
-
-	memory->type      = memory->allocation_info.memoryType;
-	memory->memory    = memory->allocation_info.deviceMemory;
-	memory->offset    = memory->allocation_info.offset;
-	memory->unique_id = VulkanNextMemoryUniqueId();
-
-	VulkanTrackAllocation(memory);
-
-	return true;
-}
-
-void VulkanDeleteImage(GraphicContext* gctx, VulkanImage* image, VulkanMemory* memory) {
-	KYTY_PROFILER_FUNCTION();
-
-	EXIT_IF(memory->allocation == nullptr);
-
-	VulkanUntrackAllocation(memory);
-	vmaDestroyImage(gctx->allocator, image->image, memory->allocation);
-	image->image            = nullptr;
-	memory->memory          = nullptr;
-	memory->allocation      = nullptr;
-	memory->allocation_info = {};
-	memory->offset          = 0;
-}
-
-void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size,
-                   uint32_t src_pitch, vk::ImageLayout dst_layout) {
+void UploadImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size,
+                 uint32_t src_pitch, vk::ImageLayout dst_layout) {
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(size == 0);
@@ -1059,9 +907,9 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_
 	                    vk::ImageLayout::eUndefined, dst_layout);
 }
 
-void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch,
-                    VulkanImage* src_image, vk::ImageLayout src_layout,
-                    vk::ImageAspectFlags aspect) {
+void DownloadImage(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch,
+                   VulkanImage* src_image, vk::ImageLayout src_layout,
+                   vk::ImageAspectFlags aspect) {
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(size == 0);
@@ -1070,67 +918,49 @@ void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t
 	    ->DownloadFromImage(ctx, dst_data, size, dst_pitch, src_image, src_layout, aspect);
 }
 
-void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size,
-                    std::span<const ImageBufferCopy> regions, VulkanImage* src_image,
-                    vk::ImageLayout src_layout) {
+void DownloadImage(GraphicContext* ctx, void* dst_data, uint64_t size,
+                   std::span<const ImageBufferCopy> regions, VulkanImage* src_image,
+                   vk::ImageLayout src_layout) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(size == 0 || regions.empty());
 	GetStagingBuffer(StagingBufferType::ReadBack)
 	    ->DownloadFromImage(ctx, dst_data, size, regions, src_image, src_layout);
 }
 
-void UtilSetImageLayoutOptimal(VulkanImage* image) {
-	ExecuteImmediateUtilCommands([&](CommandBuffer*, vk::CommandBuffer vk_command) {
-		SetImageLayout(vk_command, image, 0, VK_REMAINING_MIP_LEVELS,
-		               vk::ImageAspectFlagBits::eColor, image->layout, vk::ImageLayout::eGeneral);
-	});
-}
-
-void UtilFillImage(GraphicContext* ctx, VulkanImage* image, const void* src_data, uint64_t size,
-                   std::span<const BufferImageCopy> regions, vk::ImageLayout dst_layout) {
+void UploadImage(GraphicContext* ctx, VulkanImage* image, const void* src_data, uint64_t size,
+                 std::span<const BufferImageCopy> regions, vk::ImageLayout dst_layout) {
 	EXIT_IF(size == 0 || regions.empty());
 
 	GetStagingBuffer(StagingBufferType::Texture)
 	    ->UploadToImage(ctx, image, src_data, size, regions, dst_layout);
 }
 
-void UtilFillImage(GraphicContext* ctx, std::span<const ImageImageCopy> regions,
-                   VulkanImage* dst_image, vk::ImageLayout dst_layout) {
-	ExecuteImmediateUtilCommands([&](CommandBuffer* command, vk::CommandBuffer) {
-		UtilImageToImage(command, regions, dst_image, dst_layout);
+void CopyImageImmediate(GraphicContext* ctx, std::span<const ImageImageCopy> regions,
+                        VulkanImage* dst_image, vk::ImageLayout dst_layout) {
+	ExecuteImmediateCommands([&](CommandBuffer* command, vk::CommandBuffer) {
+		CopyImage(command, regions, dst_image, dst_layout);
 	});
 }
 
-void UtilFillImage(GraphicContext* ctx, DepthStencilVulkanImage* image, const void* src_data,
-                   uint64_t size, uint32_t src_pitch, vk::ImageAspectFlags aspect) {
+void UploadImage(GraphicContext* ctx, DepthStencilVulkanImage* image, const void* src_data,
+                 uint64_t size, uint32_t src_pitch, vk::ImageAspectFlags aspect) {
 	EXIT_IF(size == 0);
 	GetStagingBuffer(StagingBufferType::Texture)
 	    ->UploadToImage(ctx, image, src_data, size, src_pitch, aspect, image->layout,
 	                    vk::ImageLayout::eDepthStencilAttachmentOptimal);
 }
 
-void UtilUploadBuffer(GraphicContext* ctx, StagingBufferType type, VulkanBuffer* dst_buffer,
-                      uint64_t dst_offset, const void* src_data, uint64_t size) {
+void UploadBuffer(GraphicContext* ctx, StagingBufferType type, VulkanBuffer* dst_buffer,
+                  uint64_t dst_offset, const void* src_data, uint64_t size) {
 	EXIT_IF(size == 0);
 	EXIT_IF(dst_offset > dst_buffer->buffer_size || size > dst_buffer->buffer_size - dst_offset);
 	GetStagingBuffer(type)->UploadToBuffer(ctx, dst_buffer, src_data, size, dst_offset);
 }
 
-void UtilReleaseCachedResources(GraphicContext* ctx) {
-	EXIT_IF(ctx == nullptr);
-	g_texture_staging_buffer.Release(ctx);
-	g_vertex_staging_buffer.Release(ctx);
-	g_readback_staging_buffer.Release(ctx);
-	Common::LockGuard lock(g_compressed_image_copy_mutex);
-	if (g_compressed_image_copy_buffer.buffer != nullptr) {
-		VulkanDeleteBuffer(ctx, &g_compressed_image_copy_buffer);
-	}
-}
-
-void UtilCopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t size) {
+void CopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t size) {
 	EXIT_IF(size == 0 || size > src_buffer->buffer_size || size > dst_buffer->buffer_size);
 
-	ExecuteImmediateUtilCommands([&](CommandBuffer*, vk::CommandBuffer vk_command) {
+	ExecuteImmediateCommands([&](CommandBuffer*, vk::CommandBuffer vk_command) {
 		SetBufferMemoryBarrier(vk_command, src_buffer->buffer, 0, size,
 		                       vk::AccessFlagBits::eMemoryWrite, vk::AccessFlagBits::eTransferRead,
 		                       vk::PipelineStageFlagBits::eAllCommands,
@@ -1149,8 +979,8 @@ void UtilCopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t
 	});
 }
 
-void UtilDownloadBuffer(GraphicContext* ctx, VulkanBuffer* src_buffer, uint64_t src_offset,
-                        void* dst_data, uint64_t size) {
+void DownloadBuffer(GraphicContext* ctx, VulkanBuffer* src_buffer, uint64_t src_offset,
+                    void* dst_data, uint64_t size) {
 	EXIT_IF(size == 0);
 	EXIT_IF(src_offset > src_buffer->buffer_size || size > src_buffer->buffer_size - src_offset);
 	const auto family = ctx->queues[GraphicContext::QUEUE_UTIL].family;
@@ -1176,7 +1006,7 @@ void UtilDownloadBuffer(GraphicContext* ctx, VulkanBuffer* src_buffer, uint64_t 
 	                           vk::MemoryPropertyFlagBits::eHostCached;
 	VulkanCreateBuffer(ctx, size, &readback);
 
-	ExecuteImmediateUtilCommands([&](CommandBuffer*, vk::CommandBuffer vk_command) {
+	ExecuteImmediateCommands([&](CommandBuffer*, vk::CommandBuffer vk_command) {
 		SetBufferMemoryBarrier(vk_command, src_buffer->buffer, src_offset, size,
 		                       vk::AccessFlagBits::eMemoryWrite, vk::AccessFlagBits::eTransferRead,
 		                       vk::PipelineStageFlagBits::eAllCommands,
@@ -1196,4 +1026,4 @@ void UtilDownloadBuffer(GraphicContext* ctx, VulkanBuffer* src_buffer, uint64_t 
 	VulkanDeleteBuffer(ctx, &readback);
 }
 
-} // namespace Libs::Graphics
+} // namespace Libs::Graphics::Transfer

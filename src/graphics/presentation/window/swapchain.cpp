@@ -29,7 +29,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vma.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/renderDoc.h"
@@ -155,7 +155,7 @@ static void ConfigurePreparedFrame(PreparedFrame* frame, vk::Extent2D extent, vk
 	}
 	if (dst.image != nullptr) {
 		EXIT_IF(!dst.view_cache.views.empty());
-		VulkanDeleteImage(ctx, &dst, &dst.memory);
+		VulkanDeleteImage(ctx, &dst);
 		dst.memory = {};
 	}
 
@@ -178,7 +178,7 @@ static void ConfigurePreparedFrame(PreparedFrame* frame, vk::Extent2D extent, vk
 	create.usage = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
 	create.sharingMode = vk::SharingMode::eExclusive;
 	create.samples     = vk::SampleCountFlagBits::e1;
-	if (!VulkanCreateImage(ctx, &create, &dst, &dst.memory)) {
+	if (!VulkanCreateImage(ctx, create, &dst)) {
 		EXIT("failed to allocate prepared presentation image, extent=%ux%u format=%d\n",
 		     dst.extent.width, dst.extent.height, static_cast<int>(dst.format));
 	}
@@ -248,13 +248,19 @@ VulkanSwapchain::~VulkanSwapchain() = default;
 
 	vk::SwapchainKHR swapchain = nullptr;
 
-	device.createSwapchainKHR(&create_info, nullptr, &swapchain);
+	RequireVulkanSuccess(device.createSwapchainKHR(&create_info, nullptr, &swapchain),
+	                     "vkCreateSwapchainKHR");
+	EXIT_IF(swapchain == nullptr);
 
-	device.getSwapchainImagesKHR(swapchain, swapchain_images_count, nullptr);
-	EXIT_NOT_IMPLEMENTED(*swapchain_images_count == 0);
+	auto images = EnumerateVulkan<vk::Image>(
+	    "vkGetSwapchainImagesKHR", [&](uint32_t* count, vk::Image* values) {
+		    return device.getSwapchainImagesKHR(swapchain, count, values);
+	    });
+	EXIT_NOT_IMPLEMENTED(images.empty());
 
-	*swapchain_images = std::make_unique<vk::Image[]>(*swapchain_images_count);
-	device.getSwapchainImagesKHR(swapchain, swapchain_images_count, swapchain_images->get());
+	*swapchain_images_count = static_cast<uint32_t>(images.size());
+	*swapchain_images       = std::make_unique<vk::Image[]>(images.size());
+	std::copy(images.begin(), images.end(), swapchain_images->get());
 
 	*swapchain_image_views = std::make_unique<vk::ImageView[]>(*swapchain_images_count);
 	for (uint32_t i = 0; i < *swapchain_images_count; i++) {
@@ -275,7 +281,10 @@ VulkanSwapchain::~VulkanSwapchain() = default;
 		create_info.subresourceRange.layerCount     = 1;
 		create_info.subresourceRange.levelCount     = 1;
 
-		device.createImageView(&create_info, nullptr, &((*swapchain_image_views)[i]));
+		RequireVulkanSuccess(
+		    device.createImageView(&create_info, nullptr, &((*swapchain_image_views)[i])),
+		    "vkCreateImageView");
+		EXIT_IF((*swapchain_image_views)[i] == nullptr);
 	}
 
 	return swapchain;
@@ -330,7 +339,7 @@ static void VulkanDeleteSwapchain(GraphicContext* ctx, VulkanSwapchain* s) {
 	}
 	auto swapchain_owner = std::unique_ptr<VulkanSwapchain>(s);
 
-	VulkanDeviceWaitIdle(ctx);
+	Transfer::WaitForGraphicsIdle(ctx);
 
 	if (s->image_acquired_semaphores != nullptr) {
 		for (uint32_t i = 0; i < s->swapchain_images_count; i++) {
@@ -406,7 +415,7 @@ PreparedFrame* WindowPrepareFrame(CommandBuffer* buffer, VideoOutVulkanImage* im
 	ConfigurePreparedFrame(frame, image->extent, image->format);
 	const std::array copies {ImageImageCopy {
 	    .src_image = image, .width = image->extent.width, .height = image->extent.height}};
-	UtilImageToImage(buffer, copies, &frame->image, vk::ImageLayout::eTransferSrcOptimal);
+	Transfer::CopyImage(buffer, copies, &frame->image, vk::ImageLayout::eTransferSrcOptimal);
 	return frame;
 }
 
@@ -421,7 +430,7 @@ PreparedFrame* WindowPrepareBlankFrame(CommandBuffer* buffer, uint32_t width, ui
 	ConfigurePreparedFrame(frame, {width, height}, format);
 	vk::ClearColorValue clear {};
 	clear.float32[3] = opaque ? 1.0f : 0.0f;
-	UtilClearColorImage(buffer, &frame->image, clear);
+	Transfer::ClearColorImage(buffer, &frame->image, clear);
 	return frame;
 }
 
@@ -475,11 +484,11 @@ void WindowPresentFrame(PreparedFrame* frame) {
 	frame->present_commands->WaitForFenceAndReset();
 	auto& buffer = *frame->present_commands;
 
-	auto vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
+	auto vk_buffer = buffer.Handle();
 
 	buffer.Begin();
 
-	UtilBlitPreparedImage(&buffer, &frame->image, swapchain);
+	Transfer::BlitToSwapchain(&buffer, &frame->image, swapchain);
 
 	vk::ImageMemoryBarrier pre_present_barrier {};
 	pre_present_barrier.sType                           = vk::StructureType::eImageMemoryBarrier;

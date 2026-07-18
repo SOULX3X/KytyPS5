@@ -17,7 +17,7 @@ namespace Libs::Graphics {
 class SamplerCache {
 public:
 	SamplerCache() { EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread()); }
-	virtual ~SamplerCache() { KYTY_NOT_IMPLEMENTED; }
+	~SamplerCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(SamplerCache);
 
 	vk::Sampler GetSampler(const ShaderSamplerResource& r);

@@ -6,7 +6,6 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
-#include "graphics/host_gpu/utils.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <algorithm>
@@ -108,6 +107,19 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* colors,
 		}
 	}
 
+	if (!with_depth && color_count == 0) {
+		LOGF("Framebuffer: warning: no color or depth attachment\n");
+		return nullptr;
+	}
+
+	EXIT_NOT_IMPLEMENTED(with_depth && first_color != nullptr &&
+	                     (first_color_extent.width != depth->vulkan_buffer->extent.width ||
+	                      first_color_extent.height != depth->vulkan_buffer->extent.height));
+
+	if (first_color == nullptr) {
+		first_color_extent = depth->vulkan_buffer->extent;
+	}
+
 	auto* framebuffer        = new VulkanFramebuffer;
 	framebuffer->render_pass = nullptr;
 	framebuffer->framebuffer = nullptr;
@@ -119,23 +131,6 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* colors,
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 
 	EXIT_IF(gctx == nullptr);
-
-	if (!with_depth && color_count == 0) {
-		LOGF("Framebuffer: warning: no color or depth attachment\n");
-		return nullptr;
-	}
-
-	EXIT_NOT_IMPLEMENTED(!with_depth && color_count == 0);
-	EXIT_NOT_IMPLEMENTED(with_depth && first_color != nullptr &&
-	                     (first_color_extent.width != depth->vulkan_buffer->extent.width ||
-	                      first_color_extent.height != depth->vulkan_buffer->extent.height));
-
-	if (first_color == nullptr) {
-		first_color =
-		    CreateDummyBuffer(vk::Format::eB8G8R8A8Srgb, depth->vulkan_buffer->extent.width,
-		                      depth->vulkan_buffer->extent.height);
-		first_color_extent = first_color->extent;
-	}
 
 	vk::AttachmentDescription attachments[RENDER_COLOR_ATTACHMENTS_MAX + 1] = {};
 	for (uint32_t i = 0; i < color_count; i++) {
@@ -353,83 +348,6 @@ void FramebufferCache::FreeFramebufferByDepth(DepthStencilVulkanImage* image) {
 			f.framebuffer = nullptr;
 		}
 	}
-}
-
-VideoOutVulkanImage* FramebufferCache::CreateDummyBuffer(vk::Format format, uint32_t width,
-                                                         uint32_t height) {
-	for (auto* b: m_dummy_buffers) {
-		if (b->extent.width == width && b->extent.height == height && b->format == format) {
-			return b;
-		}
-	}
-
-	auto* ctx = g_render_ctx->GetGraphicCtx();
-
-	EXIT_IF(ctx == nullptr);
-
-	auto* vk_obj = new VideoOutVulkanImage;
-
-	vk_obj->extent.width  = width;
-	vk_obj->extent.height = height;
-	vk_obj->format        = format;
-	vk_obj->image         = nullptr;
-	vk_obj->layout        = vk::ImageLayout::eUndefined;
-
-	UtilResetImageViews(vk_obj);
-
-	vk::ImageCreateInfo image_info {};
-	image_info.sType         = vk::StructureType::eImageCreateInfo;
-	image_info.pNext         = nullptr;
-	image_info.flags         = {};
-	image_info.imageType     = vk::ImageType::e2D;
-	image_info.extent.width  = vk_obj->extent.width;
-	image_info.extent.height = vk_obj->extent.height;
-	image_info.extent.depth  = 1;
-	image_info.mipLevels     = 1;
-	image_info.arrayLayers   = 1;
-	image_info.format        = vk_obj->format;
-	image_info.tiling        = vk::ImageTiling::eOptimal;
-	image_info.initialLayout = vk_obj->layout;
-	image_info.usage         = vk::ImageUsageFlagBits::eColorAttachment;
-	image_info.sharingMode   = vk::SharingMode::eExclusive;
-	image_info.samples       = vk::SampleCountFlagBits::e1;
-
-	VulkanMemory mem;
-
-	mem.property = vk::MemoryPropertyFlagBits::eDeviceLocal;
-
-	bool created = VulkanCreateImage(ctx, &image_info, vk_obj, &mem);
-	EXIT_NOT_IMPLEMENTED(!created);
-
-	vk_obj->memory = mem;
-
-	vk::ImageViewCreateInfo create_info {};
-	create_info.sType                           = vk::StructureType::eImageViewCreateInfo;
-	create_info.pNext                           = nullptr;
-	create_info.flags                           = {};
-	create_info.image                           = vk_obj->image;
-	create_info.viewType                        = vk::ImageViewType::e2D;
-	create_info.format                          = vk_obj->format;
-	create_info.components.r                    = vk::ComponentSwizzle::eIdentity;
-	create_info.components.g                    = vk::ComponentSwizzle::eIdentity;
-	create_info.components.b                    = vk::ComponentSwizzle::eIdentity;
-	create_info.components.a                    = vk::ComponentSwizzle::eIdentity;
-	create_info.subresourceRange.aspectMask     = vk::ImageAspectFlagBits::eColor;
-	create_info.subresourceRange.baseArrayLayer = 0;
-	create_info.subresourceRange.baseMipLevel   = 0;
-	create_info.subresourceRange.layerCount     = 1;
-	create_info.subresourceRange.levelCount     = 1;
-
-	ctx->device.createImageView(&create_info, nullptr,
-	                            &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]);
-
-	EXIT_NOT_IMPLEMENTED(vk_obj->image_view[VulkanImage::VIEW_DEFAULT] == nullptr);
-
-	UtilSetImageLayoutOptimal(vk_obj);
-
-	m_dummy_buffers.push_back(vk_obj);
-
-	return vk_obj;
 }
 
 } // namespace Libs::Graphics

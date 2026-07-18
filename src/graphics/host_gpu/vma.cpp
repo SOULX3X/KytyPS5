@@ -17,15 +17,11 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
-#include "common/stringUtils.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/vma.h"
 
 #include <atomic>
 #include <cinttypes>
-#include <fmt/format.h>
-#include <string>
-#include <vector>
 
 namespace Libs::Graphics {
 
@@ -117,57 +113,96 @@ void VulkanLogMemoryBudget(GraphicContext* ctx) {
 	}
 }
 
-bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* memory) {
+void VulkanCreateBuffer(GraphicContext* ctx, uint64_t size, VulkanBuffer* buffer) {
 	KYTY_PROFILER_FUNCTION();
-	EXIT_IF(ctx == nullptr || memory == nullptr || memory->memory != nullptr ||
-	        memory->allocation != nullptr || ctx->allocator == nullptr ||
-	        memory->requirements.size == 0);
+	EXIT_IF(ctx == nullptr || ctx->allocator == nullptr || buffer == nullptr ||
+	        buffer->buffer != nullptr || buffer->memory.allocation != nullptr || size == 0);
 
-	const auto& properties = ctx->GetPhysicalDeviceMemoryProperties();
-	uint32_t    index      = 0;
-	for (; index < properties.memoryTypeCount; index++) {
-		if ((memory->requirements.memoryTypeBits & (uint32_t {1} << index)) != 0 &&
-		    (properties.memoryTypes[index].propertyFlags & memory->property) == memory->property) {
-			break;
-		}
-	}
+	vk::BufferCreateInfo buffer_info {};
+	buffer_info.sType       = vk::StructureType::eBufferCreateInfo;
+	buffer_info.size        = size;
+	buffer_info.usage       = buffer->usage;
+	buffer_info.sharingMode = vk::SharingMode::eExclusive;
 
-	VmaAllocationCreateInfo info {};
-	info.requiredFlags = static_cast<vk::MemoryPropertyFlags::MaskType>(memory->property);
-	memory->unique_id  = VulkanNextMemoryUniqueId();
-	const auto result  = static_cast<vk::Result>(vmaAllocateMemory(
-	    ctx->allocator,
-	    static_cast<const vk::MemoryRequirements::NativeType*>(memory->requirements), &info,
-	    &memory->allocation, &memory->allocation_info));
-	if (result == vk::Result::eSuccess) {
-		memory->type   = memory->allocation_info.memoryType;
-		memory->memory = memory->allocation_info.deviceMemory;
-		memory->offset = memory->allocation_info.offset;
-		VulkanTrackAllocation(memory);
-		return true;
-	}
+	VmaAllocationCreateInfo alloc_info {};
+	alloc_info.requiredFlags =
+	    static_cast<vk::MemoryPropertyFlags::MaskType>(buffer->memory.property);
 
-	VulkanLogMemoryBudget(ctx);
-	std::vector<std::string> stats;
-	for (uint32_t i = 0; i < properties.memoryTypeCount; i++) {
-		stats.push_back(fmt::format("{}, {}, {}", i, g_memory_stats.count[i].load(),
-		                            g_memory_stats.allocated[i].load()));
+	vk::Buffer::CType native_buffer = VK_NULL_HANDLE;
+	const auto        result        = static_cast<vk::Result>(vmaCreateBuffer(
+	    ctx->allocator, static_cast<const vk::BufferCreateInfo::NativeType*>(buffer_info),
+	    &alloc_info, &native_buffer, &buffer->memory.allocation, &buffer->memory.allocation_info));
+	buffer->buffer                  = native_buffer;
+	if (result != vk::Result::eSuccess) {
+		VulkanLogMemoryBudget(ctx);
 	}
-	EXIT("size = %" PRIu64 ", index = %u, error: %s:%s\n", memory->requirements.size, index,
-	     VulkanToString(result).c_str(), Common::Concat(stats, '\n').c_str());
-	return false;
+	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+
+	ctx->device.getBufferMemoryRequirements(buffer->buffer, &buffer->memory.requirements);
+	buffer->memory.type      = buffer->memory.allocation_info.memoryType;
+	buffer->memory.memory    = buffer->memory.allocation_info.deviceMemory;
+	buffer->memory.offset    = buffer->memory.allocation_info.offset;
+	buffer->memory.unique_id = VulkanNextMemoryUniqueId();
+	buffer->buffer_size      = size;
+	VulkanTrackAllocation(&buffer->memory);
 }
 
-void VulkanFree(GraphicContext* ctx, VulkanMemory* memory) {
+void VulkanDeleteBuffer(GraphicContext* ctx, VulkanBuffer* buffer) {
 	KYTY_PROFILER_FUNCTION();
-	EXIT_IF(ctx == nullptr || memory == nullptr || ctx->allocator == nullptr ||
-	        memory->allocation == nullptr);
-	vmaFreeMemory(ctx->allocator, memory->allocation);
-	VulkanUntrackAllocation(memory);
-	memory->memory          = nullptr;
-	memory->allocation      = nullptr;
-	memory->allocation_info = {};
-	memory->offset          = 0;
+	EXIT_IF(ctx == nullptr || ctx->allocator == nullptr || buffer == nullptr ||
+	        buffer->buffer == nullptr || buffer->memory.allocation == nullptr);
+
+	VulkanUntrackAllocation(&buffer->memory);
+	vmaDestroyBuffer(ctx->allocator, buffer->buffer, buffer->memory.allocation);
+	buffer->buffer                 = nullptr;
+	buffer->memory.memory          = nullptr;
+	buffer->memory.allocation      = nullptr;
+	buffer->memory.allocation_info = {};
+	buffer->memory.offset          = 0;
+}
+
+bool VulkanCreateImage(GraphicContext* ctx, const vk::ImageCreateInfo& image_info,
+                       VulkanImage* image) {
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(ctx == nullptr || ctx->allocator == nullptr || image == nullptr ||
+	        image->image != nullptr || image->memory.allocation != nullptr);
+
+	auto&                   memory = image->memory;
+	VmaAllocationCreateInfo alloc_info {};
+	alloc_info.requiredFlags = static_cast<vk::MemoryPropertyFlags::MaskType>(memory.property);
+
+	vk::Image::CType native_image = VK_NULL_HANDLE;
+	const auto       result       = static_cast<vk::Result>(vmaCreateImage(
+	    ctx->allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
+	    &alloc_info, &native_image, &memory.allocation, &memory.allocation_info));
+	image->image                  = native_image;
+	if (result != vk::Result::eSuccess) {
+		VulkanLogMemoryBudget(ctx);
+		return false;
+	}
+
+	ctx->device.getImageMemoryRequirements(image->image, &memory.requirements);
+	memory.type      = memory.allocation_info.memoryType;
+	memory.memory    = memory.allocation_info.deviceMemory;
+	memory.offset    = memory.allocation_info.offset;
+	memory.unique_id = VulkanNextMemoryUniqueId();
+	VulkanTrackAllocation(&memory);
+	return true;
+}
+
+void VulkanDeleteImage(GraphicContext* ctx, VulkanImage* image) {
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(ctx == nullptr || ctx->allocator == nullptr || image == nullptr ||
+	        image->image == nullptr || image->memory.allocation == nullptr);
+
+	auto& memory = image->memory;
+	VulkanUntrackAllocation(&memory);
+	vmaDestroyImage(ctx->allocator, image->image, memory.allocation);
+	image->image           = nullptr;
+	memory.memory          = nullptr;
+	memory.allocation      = nullptr;
+	memory.allocation_info = {};
+	memory.offset          = 0;
 }
 
 void VulkanMapMemory(GraphicContext* ctx, VulkanMemory* memory, void** data) {
@@ -183,24 +218,6 @@ void VulkanUnmapMemory(GraphicContext* ctx, VulkanMemory* memory) {
 	EXIT_IF(ctx == nullptr || memory == nullptr || ctx->allocator == nullptr ||
 	        memory->allocation == nullptr);
 	vmaUnmapMemory(ctx->allocator, memory->allocation);
-}
-
-void VulkanBindImageMemory(GraphicContext* ctx, VulkanImage* image, VulkanMemory* memory) {
-	KYTY_PROFILER_FUNCTION();
-	EXIT_IF(ctx == nullptr || image == nullptr || memory == nullptr || ctx->allocator == nullptr ||
-	        memory->allocation == nullptr);
-	EXIT_NOT_IMPLEMENTED(
-	    static_cast<vk::Result>(vmaBindImageMemory(ctx->allocator, memory->allocation,
-	                                               image->image)) != vk::Result::eSuccess);
-}
-
-void VulkanBindBufferMemory(GraphicContext* ctx, VulkanBuffer* buffer, VulkanMemory* memory) {
-	KYTY_PROFILER_FUNCTION();
-	EXIT_IF(ctx == nullptr || buffer == nullptr || memory == nullptr || ctx->allocator == nullptr ||
-	        memory->allocation == nullptr);
-	EXIT_NOT_IMPLEMENTED(
-	    static_cast<vk::Result>(vmaBindBufferMemory(ctx->allocator, memory->allocation,
-	                                                buffer->buffer)) != vk::Result::eSuccess);
 }
 
 } // namespace Libs::Graphics

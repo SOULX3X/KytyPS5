@@ -215,7 +215,7 @@ ValidateStorageImageResource(const ShaderRecompiler::IR::ImageResource& resource
 
 namespace ImageViewOps {
 
-[[nodiscard]] vk::ImageAspectFlags DepthAspectMask(vk::Format format) noexcept;
+[[nodiscard]] vk::ImageAspectFlags DepthAspectMask(vk::Format format);
 [[nodiscard]] bool                 FormatSupportsStorage(GraphicContext* ctx, vk::Format format);
 
 void CreateRenderTargetViews(GraphicContext* ctx, RenderTextureVulkanImage* image);

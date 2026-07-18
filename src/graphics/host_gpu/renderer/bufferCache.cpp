@@ -9,7 +9,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/resourceMutex.h"
 #include "graphics/host_gpu/renderer/textureCache.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vma.h"
 #include "kernel/memory.h"
 
@@ -21,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <thread>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -498,7 +499,7 @@ struct BufferCache::ReadbackWorker {
 				    " count=%u bytes=%u\n",
 				    page, range_count, data_offset);
 			}
-			auto vk_buffer = command->GetPool()->buffers[command->GetIndex()];
+			auto vk_buffer = command->Handle();
 			command->Begin();
 			vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 			                          vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags {},
@@ -562,7 +563,7 @@ BufferCache::~BufferCache() {
 		}
 	}
 	if (!m_buffers.empty()) {
-		VulkanDeviceWaitIdle(m_buffers.begin()->second->ctx);
+		Transfer::WaitForGraphicsIdle(m_buffers.begin()->second->ctx);
 	}
 	m_buffers.clear();
 }
@@ -628,8 +629,8 @@ void BufferCache::UnmapMemory(uint64_t vaddr, uint64_t size) {
 			    const auto ranges = m_gpu_modified_ranges.Intersections(address, bytes);
 			    for (const auto& range: ranges) {
 				    std::vector<uint8_t> data(range.size);
-				    UtilDownloadBuffer(cached->ctx, cached->buffer.get(), range.address - begin,
-				                       data.data(), range.size);
+				    Transfer::DownloadBuffer(cached->ctx, cached->buffer.get(),
+				                             range.address - begin, data.data(), range.size);
 				    Libs::LibKernel::Memory::WriteBacking(range.address, data.data(), data.size());
 				    downloaded += range.size;
 			    }
@@ -781,10 +782,10 @@ std::pair<VulkanBuffer*, uint64_t> BufferCache::ObtainBuffer(CommandBuffer*  com
 				    },
 				    [&]() noexcept {
 					    for (const auto& [upload_vaddr, upload_size]: uploads) {
-						    UtilUploadBuffer(ctx, StagingBufferType::Vertex, old.buffer.get(),
-						                     upload_vaddr - old.vaddr,
-						                     reinterpret_cast<const void*>(upload_vaddr),
-						                     upload_size);
+						    Transfer::UploadBuffer(ctx, Transfer::StagingBufferType::Vertex,
+						                           old.buffer.get(), upload_vaddr - old.vaddr,
+						                           reinterpret_cast<const void*>(upload_vaddr),
+						                           upload_size);
 					    }
 				    });
 			}
@@ -801,7 +802,7 @@ std::pair<VulkanBuffer*, uint64_t> BufferCache::ObtainBuffer(CommandBuffer*  com
 		cached->buffer->memory.property = vk::MemoryPropertyFlagBits::eDeviceLocal;
 		VulkanCreateBuffer(ctx, cached->size, cached->buffer.get());
 		if (!overlaps.empty()) {
-			auto vk_buffer = command->GetPool()->buffers[command->GetIndex()];
+			auto                                 vk_buffer = command->Handle();
 			std::vector<vk::BufferMemoryBarrier> before;
 			before.reserve(overlaps.size() + 1);
 			for (const auto& overlap: overlaps) {
@@ -866,9 +867,9 @@ std::pair<VulkanBuffer*, uint64_t> BufferCache::ObtainBuffer(CommandBuffer*  com
 	    },
 	    [&]() noexcept {
 		    for (const auto& [upload_vaddr, upload_size]: ranges) {
-			    UtilUploadBuffer(ctx, StagingBufferType::Vertex, cached.buffer.get(),
-			                     upload_vaddr - cached.vaddr,
-			                     reinterpret_cast<const void*>(upload_vaddr), upload_size);
+			    Transfer::UploadBuffer(ctx, Transfer::StagingBufferType::Vertex,
+			                           cached.buffer.get(), upload_vaddr - cached.vaddr,
+			                           reinterpret_cast<const void*>(upload_vaddr), upload_size);
 		    }
 	    });
 	if (is_written) {
@@ -963,7 +964,7 @@ BufferImageCopySource BufferCache::ObtainBufferForImage(uint64_t vaddr, uint64_t
 		for (const auto& range: dirty_ranges) {
 			auto& owner = find_owner(range.address, range.size);
 			if (std::find(waited.begin(), waited.end(), owner.ctx) == waited.end()) {
-				VulkanDeviceWaitIdle(owner.ctx);
+				Transfer::WaitForGraphicsIdle(owner.ctx);
 				waited.push_back(owner.ctx);
 			}
 		}
@@ -985,8 +986,8 @@ BufferImageCopySource BufferCache::ObtainBufferForImage(uint64_t vaddr, uint64_t
 				    auto&                owner         = find_owner(range.address, range.size);
 				    const auto           buffer_offset = range.address - owner.vaddr;
 				    std::vector<uint8_t> data(range.size);
-				    UtilDownloadBuffer(owner.ctx, owner.buffer.get(), buffer_offset, data.data(),
-				                       range.size);
+				    Transfer::DownloadBuffer(owner.ctx, owner.buffer.get(), buffer_offset,
+				                             data.data(), range.size);
 				    Libs::LibKernel::Memory::WriteBacking(range.address, data.data(), data.size());
 				    downloaded += range.size;
 			    }
@@ -1020,9 +1021,9 @@ BufferImageCopySource BufferCache::ObtainBufferForImage(uint64_t vaddr, uint64_t
 		    },
 		    [&]() noexcept {
 			    for (const auto& [address, bytes]: uploads) {
-				    UtilUploadBuffer(cached.ctx, StagingBufferType::Vertex, cached.buffer.get(),
-				                     address - cached.vaddr, reinterpret_cast<const void*>(address),
-				                     bytes);
+				    Transfer::UploadBuffer(cached.ctx, Transfer::StagingBufferType::Vertex,
+				                           cached.buffer.get(), address - cached.vaddr,
+				                           reinterpret_cast<const void*>(address), bytes);
 			    }
 		    });
 		if (uploads.empty()) {
@@ -1065,16 +1066,11 @@ vk::BufferMemoryBarrier MakeDmaBarrier(VulkanBuffer* buffer, uint64_t offset, ui
 }
 
 vk::CommandBuffer GetDmaCommandBuffer(CommandBuffer* command) {
-	if (command == nullptr || command->IsInvalid() || command->GetPool() == nullptr ||
-	    command->GetIndex() >= command->GetPool()->buffers_count) {
+	if (command == nullptr) {
 		EXIT("BufferCache: invalid DMA command buffer, command=%p\n",
 		     static_cast<const void*>(command));
 	}
-	const auto vk_buffer = command->GetPool()->buffers[command->GetIndex()];
-	if (vk_buffer == nullptr) {
-		EXIT("BufferCache: DMA command buffer handle is null, index=%u\n", command->GetIndex());
-	}
-	return vk_buffer;
+	return command->Handle();
 }
 } // namespace
 
@@ -1308,27 +1304,10 @@ void BufferCache::SetTextureCache(TextureCache& texture_cache) {
 	m_texture_cache = &texture_cache;
 }
 
-// TODO: add LRU cache
-void BufferCache::RegisterForDelete(VulkanBuffer* buffer) {
-	FaultSafeCacheLock lock(this, m_mutex);
-
-	m_delete_later.push_back(buffer);
-}
-
-void BufferCache::DeleteAll(GraphicContext* ctx) {
-	KYTY_PROFILER_BLOCK("BufferCache::DeleteAll");
+void BufferCache::ResetNullBuffer() {
+	KYTY_PROFILER_BLOCK("BufferCache::ResetNullBuffer");
 
 	FaultSafeCacheLock lock(this, m_mutex);
-
-	for (auto* buffer: m_delete_later) {
-		EXIT_IF(buffer == nullptr);
-		EXIT_IF(buffer->buffer == nullptr);
-		EXIT_IF(ctx == nullptr);
-
-		VulkanDeleteBuffer(ctx, buffer);
-		delete buffer;
-	}
-	m_delete_later.clear();
 	m_null_buffer.reset();
 }
 

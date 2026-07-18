@@ -11,11 +11,11 @@
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/objects/textureCommon.h"
-#include "graphics/host_gpu/renderer/descriptorCache.h"
 #include "graphics/host_gpu/renderer/framebufferCache.h"
+#include "graphics/host_gpu/renderer/imageView.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/displayBuffer.h"
 
@@ -34,7 +34,7 @@ void GraphicsRenderMemoryBarrier(CommandBuffer* buffer) {
 
 	Common::LockGuard lock(g_render_ctx->GetMutex());
 
-	auto vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto vk_buffer = buffer->Handle();
 
 	VulkanMemoryBarrier mem_barrier {};
 	mem_barrier.sType         = vk::StructureType::eMemoryBarrier;
@@ -121,8 +121,6 @@ void GraphicsRenderColorImageBarrier(vk::CommandBuffer vk_buffer, VulkanImage* i
 	}
 }
 
-vk::ImageAspectFlags DepthStencilAspectMask(vk::Format format);
-
 void GraphicsRenderDepthStencilImageBarrier(vk::CommandBuffer vk_buffer, VulkanImage* image,
                                             vk::ImageLayout new_layout) {
 	EXIT_IF(image == nullptr);
@@ -144,9 +142,9 @@ void GraphicsRenderDepthStencilImageBarrier(vk::CommandBuffer vk_buffer, VulkanI
 	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barrier.image               = image->image;
-	barrier.subresourceRange = {DepthStencilAspectMask(image->format), 0, VK_REMAINING_MIP_LEVELS,
-	                            0, image->layers};
-	const auto stages        = static_cast<vk::PipelineStageFlags>(
+	barrier.subresourceRange    = {ImageViewOps::DepthAspectMask(image->format), 0,
+	                               VK_REMAINING_MIP_LEVELS, 0, image->layers};
+	const auto stages           = static_cast<vk::PipelineStageFlags>(
 	    vk::PipelineStageFlagBits::eAllGraphics | vk::PipelineStageFlagBits::eComputeShader |
 	    vk::PipelineStageFlagBits::eTransfer);
 	vk_buffer.pipelineBarrier(stages, stages, vk::DependencyFlags {}, 0, nullptr, 0, nullptr, 1,
@@ -182,9 +180,10 @@ void GraphicsRenderDepthStencilBarrier(vk::CommandBuffer vk_buffer, VulkanImage*
 		image_memory_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.image               = image->image;
-		image_memory_barrier.subresourceRange.aspectMask   = DepthStencilAspectMask(image->format);
-		image_memory_barrier.subresourceRange.baseMipLevel = 0;
-		image_memory_barrier.subresourceRange.levelCount   = VK_REMAINING_MIP_LEVELS;
+		image_memory_barrier.subresourceRange.aspectMask =
+		    ImageViewOps::DepthAspectMask(image->format);
+		image_memory_barrier.subresourceRange.baseMipLevel   = 0;
+		image_memory_barrier.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
 		image_memory_barrier.subresourceRange.layerCount     = image->layers;
 
@@ -205,7 +204,7 @@ void GraphicsRenderTextureBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_
 
 	Common::LockGuard lock(g_render_ctx->GetMutex());
 
-	auto vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto vk_buffer = buffer->Handle();
 
 	auto* native = g_render_ctx->GetTextureCache()->FindRenderTargetByRange(buffer, vaddr, size);
 	if (native == nullptr) {
@@ -220,7 +219,7 @@ void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, ui
 
 	Common::LockGuard lock(g_render_ctx->GetMutex());
 
-	auto  vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto  vk_buffer = buffer->Handle();
 	auto* native    = g_render_ctx->GetTextureCache()->FindDepthTargetByRange(buffer, vaddr, size);
 	if (native == nullptr) {
 		EXIT("depth-target barrier range has no cached image\n");

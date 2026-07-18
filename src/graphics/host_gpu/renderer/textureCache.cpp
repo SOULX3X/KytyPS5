@@ -18,7 +18,8 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/renderTargetBarriers.h"
 #include "graphics/host_gpu/renderer/resourceMutex.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
+#include "graphics/host_gpu/vulkanCommon.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
@@ -104,9 +105,8 @@ struct TextureCache::CachedImage {
 	RenderTargetInfo target;
 	DepthTargetInfo  depth;
 	VideoOutInfo     video_out;
-	GraphicContext*  ctx   = nullptr;
-	VulkanImage*     image = nullptr;
-	VulkanMemory     memory;
+	GraphicContext*  ctx                 = nullptr;
+	VulkanImage*     image               = nullptr;
 	bool             gpu_modified        = false;
 	bool             buffer_modified     = false;
 	bool             stencil_initialized = false;
@@ -119,21 +119,7 @@ struct TextureCache::CachedImage {
 			     static_cast<const void*>(ctx), static_cast<const void*>(image),
 			     static_cast<uint32_t>(kind), registered);
 		}
-		switch (kind) {
-			case Kind::Texture:
-			case Kind::StorageTexture:
-				ImageOps::Destroy(ctx, static_cast<GpuTextureVulkanImage*>(image), &memory);
-				break;
-			case Kind::RenderTarget:
-				ImageOps::Destroy(ctx, static_cast<RenderTextureVulkanImage*>(image), &memory);
-				break;
-			case Kind::DepthTarget:
-				ImageOps::Destroy(ctx, static_cast<DepthStencilVulkanImage*>(image), &memory);
-				break;
-			case Kind::VideoOut:
-				ImageOps::Destroy(ctx, static_cast<VideoOutVulkanImage*>(image), &memory);
-				break;
-		}
+		ImageOps::Destroy(ctx, image);
 		image = nullptr;
 	}
 
@@ -465,10 +451,10 @@ struct TextureCache::ReadbackWorker {
 		download.resize(info.size);
 		std::fill(download.begin(), download.end(), 0);
 		const auto regions =
-		    MakeLayeredImageBufferCopies(info.layers, slice_size, info.pitch, info.width,
-		                                 info.height, vk::ImageAspectFlagBits::eDepth);
-		UtilFillBuffer(cached.ctx, download.data(), info.size, regions, cached.image,
-		               cached.image->layout);
+		    Transfer::MakeLayeredImageBufferCopies(info.layers, slice_size, info.pitch, info.width,
+		                                           info.height, vk::ImageAspectFlagBits::eDepth);
+		Transfer::DownloadImage(cached.ctx, download.data(), info.size, regions, cached.image,
+		                        cached.image->layout);
 		guest.resize(info.size);
 		cache.m_tiler.TileImage(guest.data(), download.data(), info);
 		Libs::LibKernel::Memory::WriteBacking(info.address, guest.data(), info.size);
@@ -478,11 +464,11 @@ struct TextureCache::ReadbackWorker {
 	[[nodiscard]] ReadbackRange DownloadColorImage(CachedImage& cached) {
 		const bool storage = cached.kind == CachedImage::Kind::StorageTexture;
 		const bool target  = cached.kind == CachedImage::Kind::RenderTarget;
-		const auto info    = storage ? MakeColorImageTransferInfo(
-		                                   cached.info, Prospero::SurfaceFormat(cached.info.format),
-		                                   Prospero::NumBytesPerElement(cached.info.format))
-		                             : MakeColorImageTransferInfo(cached.target);
-		const bool linear  = info.tile_mode == Prospero::GpuEnumValue(Prospero::TileMode::kLinear);
+		const auto info =
+		    storage ? MakeColorImageTransferInfo(cached.info, VulkanFormat(cached.info.format),
+		                                         Prospero::NumBytesPerElement(cached.info.format))
+		            : MakeColorImageTransferInfo(cached.target);
+		const bool linear = info.tile_mode == Prospero::GpuEnumValue(Prospero::TileMode::kLinear);
 		const bool tiled_target = target && IsTiledRenderTarget(cached.target);
 		const bool tiled_storage =
 		    storage && info.tile_mode == Prospero::GpuEnumValue(Prospero::TileMode::kRenderTarget);
@@ -520,10 +506,10 @@ struct TextureCache::ReadbackWorker {
 		}
 		download.resize(info.size);
 		std::fill(download.begin(), download.end(), 0);
-		const auto regions =
-		    MakeLayeredImageBufferCopies(layers, slice_size, info.pitch, info.width, info.height);
-		UtilFillBuffer(cached.ctx, download.data(), info.size, regions, cached.image,
-		               cached.image->layout);
+		const auto regions = Transfer::MakeLayeredImageBufferCopies(layers, slice_size, info.pitch,
+		                                                            info.width, info.height);
+		Transfer::DownloadImage(cached.ctx, download.data(), info.size, regions, cached.image,
+		                        cached.image->layout);
 		if (tiled_target || tiled_storage) {
 			guest.resize(info.size);
 			const RenderTargetInfo layout =
@@ -959,7 +945,7 @@ void TextureCache::RetireSampledTargetAliases(GraphicContext* ctx, const ImageIn
 	}
 	RequireRetirementIsolation(retire, "sampled target", requested.address, requested.size);
 	if (wait_idle) {
-		VulkanDeviceWaitIdle(ctx);
+		Transfer::WaitForGraphicsIdle(ctx);
 	}
 	for (auto* cached: retire) {
 		if (!cached->gpu_modified) {
@@ -1080,7 +1066,7 @@ void TextureCache::RetireStorageDepthAliasLocked(GraphicContext* ctx, const Imag
 	if (selected == nullptr) {
 		return;
 	}
-	VulkanDeviceWaitIdle(ctx);
+	Transfer::WaitForGraphicsIdle(ctx);
 	const auto transfer = m_readback->DownloadDepthTarget(*selected, false);
 	m_memory_tracker.ForEachDownloadRange<true>(transfer.address, transfer.size,
 	                                            [](uint64_t, uint64_t) noexcept {});
@@ -1091,7 +1077,7 @@ void TextureCache::RetireStorageDepthAliasLocked(GraphicContext* ctx, const Imag
 TextureCache::~TextureCache() {
 	m_readback.reset();
 	if (!m_images.empty()) {
-		VulkanDeviceWaitIdle(m_images.front()->ctx);
+		Transfer::WaitForGraphicsIdle(m_images.front()->ctx);
 	}
 	for (const auto& image: m_images) {
 		UnregisterImageLocked(*image, false);
@@ -1136,7 +1122,7 @@ VulkanImage* TextureCache::FindTexture(CommandBuffer* command, GraphicContext* c
 		     info.address, info.size, metadata_read);
 	}
 	std::shared_ptr<CachedImage> storage_match;
-	const auto requested_view_format = TextureGetFormat(info.format, TextureFormatUsage::Sampled);
+	const auto                   requested_view_format = TextureGetFormat(info.format);
 	for (auto& cached: m_images) {
 		if (cached->kind != CachedImage::Kind::StorageTexture) {
 			continue;
@@ -1266,7 +1252,7 @@ VulkanImage* TextureCache::FindTexture(CommandBuffer* command, GraphicContext* c
 	cached->info = info;
 	cached->ctx  = ctx;
 	vk::ComponentMapping components {};
-	cached->image = ImageOps::CreateTexture(ctx, info, false, &cached->memory, &components);
+	cached->image = ImageOps::CreateTexture(ctx, info, false, &components);
 	m_memory_tracker.ForEachUploadRange(
 	    info.address, info.size, false, [](uint64_t, uint64_t) noexcept {},
 	    [&]() noexcept {
@@ -1402,7 +1388,7 @@ StorageTextureVulkanImage* TextureCache::FindStorageTexture(CommandBuffer*   com
 	cached->info = info;
 	cached->ctx  = ctx;
 	vk::ComponentMapping components {};
-	cached->image = ImageOps::CreateTexture(ctx, info, true, &cached->memory, &components);
+	cached->image = ImageOps::CreateTexture(ctx, info, true, &components);
 	m_memory_tracker.ForEachUploadRange(
 	    info.address, info.size, true, [](uint64_t, uint64_t) noexcept {},
 	    [&]() noexcept {
@@ -1610,7 +1596,7 @@ RenderTextureVulkanImage* TextureCache::FindRenderTarget(CommandBuffer*         
 	cached->kind               = CachedImage::Kind::RenderTarget;
 	cached->target             = info;
 	cached->ctx                = ctx;
-	cached->image              = ImageOps::CreateRenderTarget(ctx, info, &cached->memory);
+	cached->image              = ImageOps::CreateRenderTarget(ctx, info);
 	const bool preserve_native = native_image_source != nullptr;
 	if (preserve_native) {
 		command->RetainResourceUntilFence(native_image_source);
@@ -1636,7 +1622,7 @@ RenderTextureVulkanImage* TextureCache::FindRenderTarget(CommandBuffer*         
 		regions.reserve(static_cast<size_t>(native_image_source->image->layers) *
 		                native_image_source->image->mip_levels);
 		AppendLayerCopies(regions, native_image_source->image, vk::ImageAspectFlagBits::eColor);
-		UtilImageToImage(command, regions, cached->image, RENDER_COLOR_IMAGE_LAYOUT);
+		Transfer::CopyImage(command, regions, cached->image, RENDER_COLOR_IMAGE_LAYOUT);
 	} else {
 		m_memory_tracker.ForEachUploadRange(
 		    info.address, info.size, false, [](uint64_t, uint64_t) noexcept {},
@@ -1885,7 +1871,7 @@ DepthStencilVulkanImage* TextureCache::FindDepthTarget(CommandBuffer* command, G
 	cached->depth               = info;
 	cached->ctx                 = ctx;
 	cached->stencil_initialized = !has_stencil;
-	cached->image               = ImageOps::CreateDepthTarget(ctx, info, &cached->memory);
+	cached->image               = ImageOps::CreateDepthTarget(ctx, info);
 	if (discarded_depth_source != nullptr) {
 		command->RetainResourceUntilFence(discarded_depth_source);
 	}
@@ -1939,13 +1925,13 @@ DepthStencilVulkanImage* TextureCache::FindDepthTarget(CommandBuffer* command, G
 			AppendLayerCopies(regions, native_depth_source->image,
 			                  vk::ImageAspectFlagBits::eStencil);
 		}
-		UtilImageToImage(command, regions, cached->image,
-		                 vk::ImageLayout::eDepthStencilAttachmentOptimal);
+		Transfer::CopyImage(command, regions, cached->image,
+		                    vk::ImageLayout::eDepthStencilAttachmentOptimal);
 		cached->gpu_modified = true;
 	} else {
 		if (sampled_depth_source != nullptr &&
 		    (sampled_depth_source->image->type != VulkanImageType::Texture ||
-		     sampled_depth_source->image->format != Prospero::SurfaceFormat(info.guest_format) ||
+		     sampled_depth_source->image->format != VulkanFormat(info.guest_format) ||
 		     sampled_depth_source->image->extent.width != info.width ||
 		     sampled_depth_source->image->extent.height != info.height)) {
 			EXIT("TextureCache: sampled-depth native source is inconsistent\n");
@@ -1967,11 +1953,11 @@ DepthStencilVulkanImage* TextureCache::FindDepthTarget(CommandBuffer* command, G
 					    break;
 				    case DepthTransitionSource::Native:
 					    command->RetainResourceUntilFence(sampled_depth_source);
-					    UtilCopyImageWithBuffer(command, ctx, sampled_depth_source->image,
-					                            vk::ImageAspectFlagBits::eColor, cached->image,
-					                            vk::ImageAspectFlagBits::eDepth,
-					                            info.bytes_per_element,
-					                            vk::ImageLayout::eDepthStencilAttachmentOptimal);
+					    Transfer::CopyImageViaBuffer(
+					        command, ctx, sampled_depth_source->image,
+					        vk::ImageAspectFlagBits::eColor, cached->image,
+					        vk::ImageAspectFlagBits::eDepth, info.bytes_per_element,
+					        vk::ImageLayout::eDepthStencilAttachmentOptimal);
 					    break;
 			    }
 		    });
@@ -2036,7 +2022,7 @@ TextureCache::RegisterVideoOutSurfaces(GraphicContext*                  ctx,
 		cached->kind      = CachedImage::Kind::VideoOut;
 		cached->video_out = info;
 		cached->ctx       = ctx;
-		cached->image     = ImageOps::CreateVideoOut(ctx, info, &cached->memory);
+		cached->image     = ImageOps::CreateVideoOut(ctx, info);
 		if (info.compression == VideoOutCompression::Uncompressed) {
 			m_memory_tracker.ForEachUploadRange(
 			    info.address, info.size, false, [](uint64_t, uint64_t) noexcept {},
@@ -2147,7 +2133,7 @@ void TextureCache::UnregisterVideoOutSurfaces(const std::vector<VideoOutVulkanIm
 			     cached->Address(), cached->Size());
 		}
 	}
-	VulkanDeviceWaitIdle(ctx);
+	Transfer::WaitForGraphicsIdle(ctx);
 	for (auto* cached: selected) {
 		if (cached->gpu_modified) {
 			m_memory_tracker.UnmarkRegionAsGpuModified(cached->Address(), cached->Size());
@@ -2269,7 +2255,7 @@ bool TextureCache::ClearImageFromBuffer(CommandBuffer* command, uint64_t vaddr, 
 		     image_cpu_modified);
 	}
 
-	auto vk_buffer = command->GetPool()->buffers[command->GetIndex()];
+	auto vk_buffer = command->Handle();
 	if (aspect == ClearAspect::Color) {
 		vk::ClearColorValue clear {};
 		if (!DecodePackedColorClear(match->image->format, packed_clear, &clear)) {
@@ -2438,7 +2424,7 @@ void TextureCache::SynchronizeColorImageToBufferLocked(CachedImage& cached, uint
 		const auto& info         = cached.info;
 		target.address           = info.address;
 		target.size              = info.size;
-		target.format            = Prospero::SurfaceFormat(info.format);
+		target.format            = VulkanFormat(info.format);
 		target.width             = info.width;
 		target.height            = info.height;
 		target.pitch             = info.pitch;
@@ -2513,7 +2499,7 @@ void TextureCache::SynchronizeColorImageToBufferLocked(CachedImage& cached, uint
 	// This is the CPU Tiler backend for the image-to-buffer synchronization seam.
 	// The vectors and Vulkan staging allocation retain capacity; a future PS5 GPU tiler can replace
 	// this block without changing alias classification or ownership transitions.
-	VulkanDeviceWaitIdle(cached.ctx);
+	Transfer::WaitForGraphicsIdle(cached.ctx);
 	m_buffer_transition_linear.resize(target.size);
 	std::fill(m_buffer_transition_linear.begin(), m_buffer_transition_linear.end(), 0);
 	std::vector<ImageBufferCopy> regions;
@@ -2533,11 +2519,11 @@ void TextureCache::SynchronizeColorImageToBufferLocked(CachedImage& cached, uint
 			                   upload.dst_y, upload.dst_z, upload.aspect});
 		}
 	} else {
-		regions = MakeLayeredImageBufferCopies(target.layers, slice_size, target.pitch,
-		                                       target.width, target.height);
+		regions = Transfer::MakeLayeredImageBufferCopies(target.layers, slice_size, target.pitch,
+		                                                 target.width, target.height);
 	}
-	UtilFillBuffer(cached.ctx, m_buffer_transition_linear.data(), target.size, regions,
-	               cached.image, cached.image->layout);
+	Transfer::DownloadImage(cached.ctx, m_buffer_transition_linear.data(), target.size, regions,
+	                        cached.image, cached.image->layout);
 	if (storage) {
 		m_buffer_transition_guest.resize(target.size);
 		m_tiler.TileImage(m_buffer_transition_guest.data(), m_buffer_transition_linear.data(),
@@ -2599,13 +2585,13 @@ void TextureCache::SynchronizeDepthImageToBufferLocked(CachedImage& cached, uint
 		     info.layers, static_cast<int>(info.format), info.guest_format, info.bytes_per_element,
 		     has_stencil, has_htile, cached.gpu_modified, cached.buffer_modified);
 	}
-	VulkanDeviceWaitIdle(cached.ctx);
+	Transfer::WaitForGraphicsIdle(cached.ctx);
 	m_buffer_transition_linear.resize(info.size);
 	std::fill(m_buffer_transition_linear.begin(), m_buffer_transition_linear.end(), 0);
-	const auto regions = MakeLayeredImageBufferCopies(1, info.size, info.pitch, info.width,
-	                                                  info.height, vk::ImageAspectFlagBits::eDepth);
-	UtilFillBuffer(cached.ctx, m_buffer_transition_linear.data(), info.size, regions, cached.image,
-	               cached.image->layout);
+	const auto regions = Transfer::MakeLayeredImageBufferCopies(
+	    1, info.size, info.pitch, info.width, info.height, vk::ImageAspectFlagBits::eDepth);
+	Transfer::DownloadImage(cached.ctx, m_buffer_transition_linear.data(), info.size, regions,
+	                        cached.image, cached.image->layout);
 	m_buffer_transition_guest.resize(info.size);
 	m_tiler.TileImage(m_buffer_transition_guest.data(), m_buffer_transition_linear.data(), info);
 	Libs::LibKernel::Memory::WriteBacking(info.address, m_buffer_transition_guest.data(),
@@ -3169,7 +3155,7 @@ void TextureCache::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		}
 	}
 	if (wait_ctx != nullptr) {
-		VulkanDeviceWaitIdle(wait_ctx);
+		Transfer::WaitForGraphicsIdle(wait_ctx);
 	}
 	for (auto& cached: m_images) {
 		if (!cached->OverlapsRange(vaddr, size, false) || !cached->gpu_modified) {

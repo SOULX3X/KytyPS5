@@ -23,7 +23,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/renderTargetBarriers.h"
 #include "graphics/host_gpu/renderer/shaderResourceBarrier.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vma.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/displayBuffer.h"
@@ -34,9 +34,9 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstring>
 #include <fmt/format.h>
 #include <limits>
+#include <span>
 
 #ifdef min
 #undef min
@@ -69,14 +69,6 @@ static const char* VulkanImageTypeName(VulkanImageType type) {
 		case VulkanImageType::Unknown:
 		default: return "Unknown";
 	}
-}
-
-vk::ImageAspectFlags DepthStencilAspectMask(vk::Format format) {
-	auto ret = static_cast<vk::ImageAspectFlags>(vk::ImageAspectFlagBits::eDepth);
-	if (format == vk::Format::eD24UnormS8Uint || format == vk::Format::eD32SfloatS8Uint) {
-		ret |= vk::ImageAspectFlagBits::eStencil;
-	}
-	return ret;
 }
 
 static int SampledArrayViewIndex(const VulkanImage* image, int view_index) {
@@ -126,25 +118,10 @@ static VulkanImage* GetDummyStorageTexture(TextureVariant variant) {
 	                                                               TextureVariantIs3D(variant));
 }
 
-static ShaderBufferResource
-NativeBufferDescriptor(const ShaderRecompiler::IR::DescriptorValue& descriptor) {
-	ShaderBufferResource result;
-	std::copy_n(descriptor.dwords.begin(), std::size(result.fields), result.fields);
-	return result;
-}
-
-static ShaderTextureResource
-NativeTextureDescriptor(const ShaderRecompiler::IR::DescriptorValue& descriptor) {
-	ShaderTextureResource result;
-	std::copy_n(descriptor.dwords.begin(), std::size(result.fields), result.fields);
-	return result;
-}
-
-static ShaderSamplerResource
-NativeSamplerDescriptor(const ShaderRecompiler::IR::DescriptorValue& descriptor) {
-	ShaderSamplerResource result;
-	std::copy_n(descriptor.dwords.begin(), std::size(result.fields), result.fields);
-	return result;
+static void CopyNativeDescriptor(const ShaderRecompiler::IR::DescriptorValue& source,
+                                 std::span<uint32_t>                          destination) {
+	EXIT_IF(source.dword_count != destination.size());
+	std::copy_n(source.dwords.begin(), destination.size(), destination.begin());
 }
 
 static BufferView NativeStorageBuffer(uint64_t submit_id, CommandBuffer* command_buffer,
@@ -505,10 +482,11 @@ static DescriptorCache::TextureBinding
 NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
               const ShaderRecompiler::IR::ImageResource&   resource,
               const ShaderRecompiler::IR::DescriptorValue& value) {
-	auto       descriptor = NativeTextureDescriptor(value);
-	const bool storage    = resource.kind == ShaderRecompiler::IR::ResourceKind::StorageImage ||
-	                        resource.kind == ShaderRecompiler::IR::ResourceKind::StorageImageUint;
-	const auto variant    = NativeTextureVariant(resource);
+	ShaderTextureResource descriptor;
+	CopyNativeDescriptor(value, descriptor.fields);
+	const bool storage = resource.kind == ShaderRecompiler::IR::ResourceKind::StorageImage ||
+	                     resource.kind == ShaderRecompiler::IR::ResourceKind::StorageImageUint;
+	const auto variant = NativeTextureVariant(resource);
 	if (storage) {
 		ValidateStorageImageResource(resource);
 	}
@@ -542,8 +520,7 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 		EXIT("sampled image numeric class mismatch: kind=%u format=%u addr=0x%016" PRIx64 "\n",
 		     static_cast<uint32_t>(resource.kind), format, address);
 	}
-	const auto view_format = TextureGetFormat(format, storage ? TextureFormatUsage::Storage
-	                                                          : TextureFormatUsage::Sampled);
+	const auto view_format = TextureGetFormat(format);
 	const auto type        = static_cast<Prospero::ImageType>(descriptor.Type());
 	const auto target_view =
 	    ResolveTargetTextureView(resource, type, descriptor.BaseArray5(), depth);
@@ -754,7 +731,8 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 
 static vk::Sampler NativeSampler(const ShaderRecompiler::IR::Program& program, uint32_t index,
                                  const ShaderRecompiler::IR::DescriptorValue& value) {
-	auto       descriptor    = NativeSamplerDescriptor(value);
+	ShaderSamplerResource descriptor;
+	CopyNativeDescriptor(value, descriptor.fields);
 	const bool depth_compare = std::any_of(program.info.sampled_pairs.begin(),
 	                                       program.info.sampled_pairs.end(), [&](const auto& pair) {
 		                                       return pair.sampler == index &&
@@ -776,12 +754,10 @@ static BufferView NativeUpload(CommandBuffer* command_buffer, std::span<const ui
 	return result;
 }
 
-std::vector<ShaderAddressWriteRange> BindDescriptors(uint64_t submit_id, CommandBuffer* buffer,
-                                                     vk::PipelineBindPoint     pipeline_bind_point,
-                                                     vk::PipelineLayout        layout,
-                                                     const ShaderStageRuntime& runtime,
-                                                     vk::ShaderStageFlags      vk_stage,
-                                                     DescriptorCache::Stage    stage) {
+void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer,
+                     vk::PipelineBindPoint pipeline_bind_point, vk::PipelineLayout layout,
+                     const ShaderStageRuntime& runtime, vk::ShaderStageFlags vk_stage,
+                     DescriptorCache::Stage stage) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(buffer == nullptr || !runtime);
 	const auto& program  = *runtime.program;
@@ -790,15 +766,16 @@ std::vector<ShaderAddressWriteRange> BindDescriptors(uint64_t submit_id, Command
 	if (!ShaderRecompiler::IR::ValidateResourceSpecialization(program, snapshot, &error)) {
 		EXIT("invalid native shader runtime snapshot: %s\n", error.c_str());
 	}
-	auto       vk_buffer     = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto       vk_buffer     = buffer->Handle();
 	const auto shader_stages = ShaderPipelineStages(vk_stage);
 
 	DescriptorCache::NativeDescriptors descriptors;
 	descriptors.buffers.reserve(program.info.buffers.size());
 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
+		ShaderBufferResource descriptor;
+		CopyNativeDescriptor(snapshot.buffers[i], descriptor.fields);
 		descriptors.buffers.push_back(
-		    NativeStorageBuffer(submit_id, buffer, NativeBufferDescriptor(snapshot.buffers[i]),
-		                        program.info.buffers[i]));
+		    NativeStorageBuffer(submit_id, buffer, descriptor, program.info.buffers[i]));
 	}
 	descriptors.images.reserve(program.info.images.size());
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
@@ -816,17 +793,9 @@ std::vector<ShaderAddressWriteRange> BindDescriptors(uint64_t submit_id, Command
 		descriptors.samplers.push_back(NativeSampler(program, i, snapshot.samplers[i]));
 	}
 	descriptors.addresses.reserve(program.info.addresses.size());
-	std::vector<ShaderAddressWriteRange> address_writes;
 	for (uint32_t i = 0; i < program.info.addresses.size(); i++) {
-		auto view = NativeAddressBuffer(submit_id, buffer, program.info.addresses[i],
-		                                snapshot.addresses[i]);
-		descriptors.addresses.push_back(view);
-		if (program.info.addresses[i].written && snapshot.addresses[i].binding_base != 0) {
-			EXIT_IF(view.buffer == nullptr || view.offset != 0 || view.range == VK_WHOLE_SIZE ||
-			        view.range == 0);
-			address_writes.push_back({view.buffer, snapshot.addresses[i].binding_base,
-			                          static_cast<uint64_t>(view.range)});
-		}
+		descriptors.addresses.push_back(NativeAddressBuffer(
+		    submit_id, buffer, program.info.addresses[i], snapshot.addresses[i]));
 	}
 	if (ShaderRecompiler::IR::FindBinding(
 	        program.bindings, ShaderRecompiler::IR::DescriptorBindingKind::FlattenedSrt) !=
@@ -893,7 +862,6 @@ std::vector<ShaderAddressWriteRange> BindDescriptors(uint64_t submit_id, Command
 		vk_buffer.pushConstants(layout, vk_stage, program.bindings.push_constant_offset,
 		                        program.bindings.push_constant_size, user_data.data());
 	}
-	return address_writes;
 }
 
 } // namespace Libs::Graphics

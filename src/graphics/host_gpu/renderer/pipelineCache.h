@@ -4,7 +4,6 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
-#include "common/file.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -15,7 +14,6 @@
 #include <span>
 #include <type_traits>
 #include <unordered_map>
-#include <vector>
 
 namespace Libs::Graphics {
 
@@ -86,7 +84,7 @@ static_assert(sizeof(PipelineStaticParameters) ==
 class PipelineCache {
 public:
 	PipelineCache() { EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread()); }
-	virtual ~PipelineCache() { KYTY_NOT_IMPLEMENTED; }
+	~PipelineCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(PipelineCache);
 
 	struct Pipeline {
@@ -112,8 +110,6 @@ public:
 	ComputePipeline* CreateComputePipeline(ShaderComputeInputInfo*      input_info,
 	                                       const HW::ComputeShaderInfo* cs_regs,
 	                                       std::span<const uint32_t>    cs_spirv);
-	void             DeletePipeline(Pipeline* pipeline);
-	void             DeleteAllPipelines();
 
 private:
 	struct GraphicsPipelineKey {
@@ -177,10 +173,6 @@ private:
 			return hash;
 		}
 	};
-
-	void DeletePipelineInternal(Pipeline* p);
-	void DumpToFile(Common::File* f, const Pipeline& p);
-	void DumpPipeline(const char* action, const Pipeline& p);
 
 	std::unordered_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>,
 	                   GraphicsPipelineKeyHash>

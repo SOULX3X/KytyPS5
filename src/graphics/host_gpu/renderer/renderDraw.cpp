@@ -22,11 +22,9 @@
 #include "graphics/host_gpu/renderer/pipelineCache.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
-#include "graphics/host_gpu/renderer/renderInternal.h"
-#include "graphics/host_gpu/renderer/renderVertex.h"
 #include "graphics/host_gpu/renderer/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/shaderSubgroup.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ShaderIR.h"
@@ -46,6 +44,25 @@
 #include <vector>
 
 namespace Libs::Graphics {
+
+int32_t ResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& vs_input_info) {
+	if (index_offset != 0 || !vs_input_info.fetch_embedded) {
+		return static_cast<int32_t>(index_offset);
+	}
+
+	EXIT_IF(!vs_input_info.stage);
+	const auto& program   = *vs_input_info.stage.program;
+	const auto& resources = *vs_input_info.stage.resources;
+	if (program.info.vertex_offset_sgpr >= static_cast<int32_t>(program.user_data_base)) {
+		const auto index =
+		    static_cast<uint32_t>(program.info.vertex_offset_sgpr) - program.user_data_base;
+		if (index < resources.user_data.size()) {
+			return static_cast<int32_t>(resources.user_data[index]);
+		}
+	}
+
+	return 0;
+}
 
 static std::atomic<uint32_t> g_draw_state_log_count       = 0;
 static std::atomic<uint32_t> g_draw_input_log_count       = 0;
@@ -285,66 +302,6 @@ static void LogDrawInputState(const RenderColorInfo&       color,
 			     log_id, ai, res_index, b.attr_offsets[ai], rd.register_start, rd.registers_num,
 			     rd.fetch_index, r.fields[0], r.fields[1], r.fields[2], r.fields[3]);
 		}
-	}
-}
-
-[[maybe_unused]] static void LogDrawTextureState(const char*                 draw_name,
-                                                 const RenderColorInfo&      color,
-                                                 const ShaderPixelInputInfo& ps_input_info) {
-	static std::atomic<uint32_t> log_count {0};
-	const auto                   log_id = log_count.fetch_add(1, std::memory_order_relaxed);
-	if (log_id >= 256) {
-		return;
-	}
-
-	const auto& ps_program     = *ps_input_info.stage.program;
-	const auto& ps_resources   = *ps_input_info.stage.resources;
-	const auto  sampled_images = std::count_if(
-	    ps_program.info.images.begin(), ps_program.info.images.end(), [](const auto& image) {
-		    return image.kind == ShaderRecompiler::IR::ResourceKind::Image ||
-		           image.kind == ShaderRecompiler::IR::ResourceKind::ImageUint;
-	    });
-	LOGF("DrawTextureState[%u]: frame=%d %s target=%s addr=0x%010" PRIx64
-	     " textures=%zu sampled=%zu storage=%zu samplers=%zu\n",
-	     log_id, GraphicsRunGetFrameNum(), draw_name, RenderColorTypeName(color.type),
-	     color.base_addr, ps_program.info.images.size(), sampled_images,
-	     ps_program.info.images.size() - sampled_images, ps_program.info.samplers.size());
-
-	for (uint32_t i = 0; i < ps_program.info.images.size(); i++) {
-		const auto& image = ps_program.info.images[i];
-		const auto  r     = DecodeNativeDescriptor<ShaderTextureResource>(ps_resources.images[i]);
-		LOGF("DrawTextureState[%u]: tex[%u] source=%u usage=%s sampled=%s "
-		     "addr=0x%010" PRIx64 " type=%u fmt=%u extent=%ux%u depth=%u levels=%u base_level=%u "
-		     "tile=%u swizzle=0x%03" PRIx32 " fields=%08" PRIx32 " %08" PRIx32 " %08" PRIx32
-		     " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 "\n",
-		     log_id, i, image.source, image.written ? "read-write" : "read-only",
-		     (image.kind == ShaderRecompiler::IR::ResourceKind::Image ||
-		      image.kind == ShaderRecompiler::IR::ResourceKind::ImageUint)
-		         ? "true"
-		         : "false",
-		     r.Base40(), static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Format()),
-		     static_cast<uint32_t>(r.Width5()) + 1u, static_cast<uint32_t>(r.Height5()) + 1u,
-		     static_cast<uint32_t>(r.Depth()) + 1u,
-		     std::max<uint32_t>(static_cast<uint32_t>(r.LastLevel()),
-		                        static_cast<uint32_t>(r.MaxMip())) +
-		         1u,
-		     static_cast<uint32_t>(r.BaseLevel()), static_cast<uint32_t>(r.TileMode()),
-		     r.DstSelXYZW(), r.fields[0], r.fields[1], r.fields[2], r.fields[3], r.fields[4],
-		     r.fields[5], r.fields[6], r.fields[7]);
-	}
-
-	for (uint32_t i = 0; i < ps_program.info.samplers.size(); i++) {
-		const auto& sampler = ps_program.info.samplers[i];
-		const auto  r = DecodeNativeDescriptor<ShaderSamplerResource>(ps_resources.samplers[i]);
-		LOGF("DrawTextureState[%u]: samp[%u] source=%u clamp=%u/%u/%u filter=%u/%u/%u "
-		     "mip=%u lod=%u-%u"
-		     " bias=%d fields=%08" PRIx32 " %08" PRIx32 " %08" PRIx32 " %08" PRIx32 "\n",
-		     log_id, i, sampler.source, static_cast<uint32_t>(r.ClampX()),
-		     static_cast<uint32_t>(r.ClampY()), static_cast<uint32_t>(r.ClampZ()),
-		     static_cast<uint32_t>(r.XyMagFilter()), static_cast<uint32_t>(r.XyMinFilter()),
-		     static_cast<uint32_t>(r.ZFilter()), static_cast<uint32_t>(r.MipFilter()),
-		     static_cast<uint32_t>(r.MinLod()), static_cast<uint32_t>(r.MaxLod()),
-		     static_cast<int32_t>(r.LodBias()), r.fields[0], r.fields[1], r.fields[2], r.fields[3]);
 	}
 }
 
@@ -730,7 +687,7 @@ static bool PrepareDrawRenderState(uint64_t submit_id, CommandBuffer* buffer, HW
 	EXIT_NOT_IMPLEMENTED(state->framebuffer == nullptr);
 	EXIT_NOT_IMPLEMENTED(state->framebuffer->render_pass == nullptr);
 
-	state->vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	state->vk_buffer = buffer->Handle();
 
 	return true;
 }
@@ -851,8 +808,10 @@ static void LogDrawStateIfNeeded(HW::Context* ctx, HW::UserConfig* ucfg, const D
 		return;
 	}
 
-	LogDrawTargetState(draw.name, state.color_info[0], state.depth_info, ctx, ucfg,
-	                   state.ps_input_info, draw.index_count, draw.flags);
+	if (state.ps_active) {
+		LogDrawTargetState(draw.name, state.color_info[0], state.depth_info, ctx, ucfg,
+		                   state.ps_input_info, draw.index_count, draw.flags);
+	}
 	LogDrawInputState(state.color_info[0], state.vs_input_info, index_type_and_size,
 	                  draw.index_count, index_addr);
 	// LogDrawTextureState(draw.name, state.color_info[0], state.ps_input_info);
@@ -965,21 +924,18 @@ static void ExecutePreparedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::C
 		if (set_auto_debug) {
 			SetDrawDebugPhase(buffer, submit_id, draw, 0x200u);
 		}
-		const auto vs_address_writes =
-		    BindDescriptors(submit_id, buffer, vk::PipelineBindPoint::eGraphics,
-		                    pipeline->pipeline_layout, state->vs_input_info.stage,
-		                    vk::ShaderStageFlagBits::eVertex, DescriptorCache::Stage::Vertex);
+		BindDescriptors(submit_id, buffer, vk::PipelineBindPoint::eGraphics,
+		                pipeline->pipeline_layout, state->vs_input_info.stage,
+		                vk::ShaderStageFlagBits::eVertex, DescriptorCache::Stage::Vertex);
 
-		std::vector<ShaderAddressWriteRange> ps_address_writes;
 		if (state->ps_active) {
 			LogDrawPhase(draw.name, "BindDescriptorsPS");
 			if (set_auto_debug) {
 				SetDrawDebugPhase(buffer, submit_id, draw, 0x300u);
 			}
-			ps_address_writes =
-			    BindDescriptors(submit_id, buffer, vk::PipelineBindPoint::eGraphics,
-			                    pipeline->pipeline_layout, state->ps_input_info.stage,
-			                    vk::ShaderStageFlagBits::eFragment, DescriptorCache::Stage::Pixel);
+			BindDescriptors(submit_id, buffer, vk::PipelineBindPoint::eGraphics,
+			                pipeline->pipeline_layout, state->ps_input_info.stage,
+			                vk::ShaderStageFlagBits::eFragment, DescriptorCache::Stage::Pixel);
 		}
 		if (buffer->GetRecordingGeneration() != recording_generation) {
 			continue;
@@ -1008,15 +964,11 @@ static void ExecutePreparedDraw(uint64_t submit_id, CommandBuffer* buffer, HW::C
 		}
 		buffer->EndRenderPass();
 		vk::PipelineStageFlags shader_write_stages = {};
-		const bool             vs_wrote_buffers = HasShaderBufferWrites(state->vs_input_info.stage);
-		const bool             vs_wrote_addresses = MarkShaderAddressWrites(vs_address_writes);
-		if (vs_wrote_buffers || vs_wrote_addresses) {
+		if (HasShaderBufferWrites(state->vs_input_info.stage)) {
 			shader_write_stages |= vk::PipelineStageFlagBits::eVertexShader;
 		}
 		if (state->ps_active) {
-			const bool ps_wrote_buffers   = HasShaderBufferWrites(state->ps_input_info.stage);
-			const bool ps_wrote_addresses = MarkShaderAddressWrites(ps_address_writes);
-			if (ps_wrote_buffers || ps_wrote_addresses) {
+			if (HasShaderBufferWrites(state->ps_input_info.stage)) {
 				shader_write_stages |= vk::PipelineStageFlagBits::eFragmentShader;
 			}
 		}
@@ -1328,7 +1280,7 @@ static bool ResolveColorTargets(uint64_t submit_id, CommandBuffer* buffer, const
 	const std::array regions {MakeColorResolveCopy(src, dst, width, height)};
 
 	MarkRenderTargetGpuWritten(dst);
-	UtilImageToImage(buffer, regions, dst.vulkan_buffer, dst.vulkan_buffer->layout);
+	Transfer::CopyImage(buffer, regions, dst.vulkan_buffer, dst.vulkan_buffer->layout);
 	return true;
 }
 

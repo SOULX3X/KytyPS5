@@ -10,7 +10,8 @@
 #include "graphics/host_gpu/renderer/framebufferCache.h"
 #include "graphics/host_gpu/renderer/imageView.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
+#include "graphics/host_gpu/vma.h"
 #include "graphics/shader/shader.h"
 
 #include <algorithm>
@@ -40,7 +41,7 @@ TextureImageCreateParams MakeImageParams(const ImageInfo& info, bool storage) {
 	params.image_layout    = TextureUploadDestination::MipLevels;
 	params.allow_cube_view = !storage;
 	params.compatible_format_views =
-	    storage && (IsRgba8SrgbViewFormat(TextureGetFormat(info.format, params.format_usage)) ||
+	    storage && (IsRgba8SrgbViewFormat(TextureGetFormat(info.format)) ||
 	                info.format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32UInt) ||
 	                info.format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32Float));
 	params.owner = storage ? "StorageTextureCache" : "TextureCache";
@@ -140,13 +141,13 @@ uint32_t RenderTargetTransferFormat(uint32_t bytes_per_element) {
 }
 
 GpuTextureVulkanImage* CreateTexture(GraphicContext* ctx, const ImageInfo& info, bool storage,
-                                     VulkanMemory* memory, vk::ComponentMapping* components) {
+                                     vk::ComponentMapping* components) {
 	if (components == nullptr) {
 		EXIT("TextureCache: invalid texture component output\n");
 	}
 	auto* image = storage ? static_cast<GpuTextureVulkanImage*>(new StorageTextureVulkanImage)
 	                      : new TextureVulkanImage;
-	*components = TextureCreateImage(ctx, image, memory, MakeImageParams(info, storage));
+	*components = TextureCreateImage(ctx, image, MakeImageParams(info, storage));
 	return image;
 }
 
@@ -172,7 +173,7 @@ void UploadRenderTargetLayers(GraphicContext* ctx, RenderTextureVulkanImage* ima
 		     base_layer, layer_count, info.layers, image != nullptr ? image->layers : 0, info.size);
 	}
 	if (refresh) {
-		VulkanDeviceWaitIdle(ctx);
+		Transfer::WaitForGraphicsIdle(ctx);
 	}
 	const auto slice_size  = info.size / info.layers;
 	const auto upload_size = slice_size * layer_count;
@@ -204,16 +205,16 @@ void UploadRenderTargetLayers(GraphicContext* ctx, RenderTextureVulkanImage* ima
 		return;
 	}
 	if (info.tile_mode == Prospero::GpuEnumValue(Prospero::TileMode::kRenderTarget) &&
-	    UtilBufferIsTiled(info.address, slice_size)) {
-		UtilScratchBuffer scratch(slice_size);
+	    Transfer::GuestBufferIsTiled(info.address, slice_size)) {
+		Transfer::ScratchBuffer scratch(slice_size);
 		TileConvertTiledToLinearRenderTarget(
 		    scratch.Data(), reinterpret_cast<const void*>(info.address), info.width, info.height,
 		    info.pitch, info.bytes_per_element, slice_size);
-		UtilFillImage(ctx, image, scratch.Data(), slice_size, info.pitch,
-		              vk::ImageLayout::eGeneral);
+		Transfer::UploadImage(ctx, image, scratch.Data(), slice_size, info.pitch,
+		                      vk::ImageLayout::eGeneral);
 	} else {
-		UtilFillImage(ctx, image, reinterpret_cast<const void*>(info.address), slice_size,
-		              info.pitch, vk::ImageLayout::eGeneral);
+		Transfer::UploadImage(ctx, image, reinterpret_cast<const void*>(info.address), slice_size,
+		                      info.pitch, vk::ImageLayout::eGeneral);
 	}
 }
 
@@ -222,8 +223,7 @@ void UploadRenderTarget(GraphicContext* ctx, RenderTextureVulkanImage* image,
 	UploadRenderTargetLayers(ctx, image, info, 0, info.layers, refresh);
 }
 
-RenderTextureVulkanImage* CreateRenderTarget(GraphicContext* ctx, const RenderTargetInfo& info,
-                                             VulkanMemory* memory) {
+RenderTextureVulkanImage* CreateRenderTarget(GraphicContext* ctx, const RenderTargetInfo& info) {
 	auto* image          = new RenderTextureVulkanImage;
 	image->extent.width  = info.width;
 	image->extent.height = info.height;
@@ -231,33 +231,30 @@ RenderTextureVulkanImage* CreateRenderTarget(GraphicContext* ctx, const RenderTa
 	image->mip_levels    = info.levels;
 	image->layers        = info.layers;
 	image->layout        = vk::ImageLayout::eUndefined;
-	UtilResetImageViews(image);
 	vk::ImageCreateInfo create {};
-	create.sType         = vk::StructureType::eImageCreateInfo;
-	create.flags         = RenderTargetCreateFlags(info.format);
-	create.imageType     = vk::ImageType::e2D;
-	create.extent        = {info.width, info.height, 1};
-	create.mipLevels     = info.levels;
-	create.arrayLayers   = info.layers;
-	create.format        = info.format;
-	create.tiling        = vk::ImageTiling::eOptimal;
-	create.initialLayout = vk::ImageLayout::eUndefined;
-	create.usage         = RenderTargetUsage(ctx, info.format, create.flags);
-	create.sharingMode   = vk::SharingMode::eExclusive;
-	create.samples       = vk::SampleCountFlagBits::e1;
-	memory->property     = vk::MemoryPropertyFlagBits::eDeviceLocal;
-	if (!VulkanCreateImage(ctx, &create, image, memory)) {
+	create.sType           = vk::StructureType::eImageCreateInfo;
+	create.flags           = RenderTargetCreateFlags(info.format);
+	create.imageType       = vk::ImageType::e2D;
+	create.extent          = {info.width, info.height, 1};
+	create.mipLevels       = info.levels;
+	create.arrayLayers     = info.layers;
+	create.format          = info.format;
+	create.tiling          = vk::ImageTiling::eOptimal;
+	create.initialLayout   = vk::ImageLayout::eUndefined;
+	create.usage           = RenderTargetUsage(ctx, info.format, create.flags);
+	create.sharingMode     = vk::SharingMode::eExclusive;
+	create.samples         = vk::SampleCountFlagBits::e1;
+	image->memory.property = vk::MemoryPropertyFlagBits::eDeviceLocal;
+	if (!VulkanCreateImage(ctx, create, image)) {
 		EXIT("TextureCache: failed to create render target, addr=0x%016" PRIx64
 		     " extent=%ux%u format=%d\n",
 		     info.address, info.width, info.height, static_cast<int>(info.format));
 	}
-	image->memory = *memory;
 	ImageViewOps::CreateRenderTargetViews(ctx, image);
 	return image;
 }
 
-DepthStencilVulkanImage* CreateDepthTarget(GraphicContext* ctx, const DepthTargetInfo& info,
-                                           VulkanMemory* memory) {
+DepthStencilVulkanImage* CreateDepthTarget(GraphicContext* ctx, const DepthTargetInfo& info) {
 	vk::ImageCreateInfo create {};
 	create.sType         = vk::StructureType::eImageCreateInfo;
 	create.imageType     = vk::ImageType::e2D;
@@ -278,22 +275,20 @@ DepthStencilVulkanImage* CreateDepthTarget(GraphicContext* ctx, const DepthTarge
 		     static_cast<int>(info.format),
 		     static_cast<vk::ImageUsageFlags::MaskType>(create.usage));
 	}
-	auto* image          = new DepthStencilVulkanImage;
-	image->extent.width  = info.width;
-	image->extent.height = info.height;
-	image->guest_pitch   = info.pitch;
-	image->layers        = info.layers;
-	image->format        = info.format;
-	image->layout        = vk::ImageLayout::eUndefined;
-	image->compressed    = false;
-	UtilResetImageViews(image);
-	memory->property = vk::MemoryPropertyFlagBits::eDeviceLocal;
-	if (!VulkanCreateImage(ctx, &create, image, memory)) {
+	auto* image            = new DepthStencilVulkanImage;
+	image->extent.width    = info.width;
+	image->extent.height   = info.height;
+	image->guest_pitch     = info.pitch;
+	image->layers          = info.layers;
+	image->format          = info.format;
+	image->layout          = vk::ImageLayout::eUndefined;
+	image->compressed      = false;
+	image->memory.property = vk::MemoryPropertyFlagBits::eDeviceLocal;
+	if (!VulkanCreateImage(ctx, create, image)) {
 		EXIT("TextureCache: failed to create depth target, addr=0x%016" PRIx64
 		     " extent=%ux%u format=%d\n",
 		     info.address, info.width, info.height, static_cast<int>(info.format));
 	}
-	image->memory = *memory;
 	ImageViewOps::CreateDepthViews(ctx, image);
 	return image;
 }
@@ -334,34 +329,31 @@ void ValidateVideoOut(GraphicContext* ctx, const VideoOutInfo& info) {
 	(void)RenderTargetUsage(ctx, info.format, vk::ImageCreateFlags {});
 }
 
-VideoOutVulkanImage* CreateVideoOut(GraphicContext* ctx, const VideoOutInfo& info,
-                                    VulkanMemory* memory) {
+VideoOutVulkanImage* CreateVideoOut(GraphicContext* ctx, const VideoOutInfo& info) {
 	auto* image          = new VideoOutVulkanImage;
 	image->extent.width  = info.width;
 	image->extent.height = info.height;
 	image->format        = info.format;
 	image->layout        = vk::ImageLayout::eUndefined;
-	UtilResetImageViews(image);
 	vk::ImageCreateInfo create {};
-	create.sType         = vk::StructureType::eImageCreateInfo;
-	create.imageType     = vk::ImageType::e2D;
-	create.extent        = {info.width, info.height, 1};
-	create.mipLevels     = 1;
-	create.arrayLayers   = 1;
-	create.format        = info.format;
-	create.tiling        = vk::ImageTiling::eOptimal;
-	create.initialLayout = vk::ImageLayout::eUndefined;
-	create.flags         = RenderTargetCreateFlags(info.format);
-	create.usage         = RenderTargetUsage(ctx, info.format, create.flags);
-	create.sharingMode   = vk::SharingMode::eExclusive;
-	create.samples       = vk::SampleCountFlagBits::e1;
-	memory->property     = vk::MemoryPropertyFlagBits::eDeviceLocal;
-	if (!VulkanCreateImage(ctx, &create, image, memory)) {
+	create.sType           = vk::StructureType::eImageCreateInfo;
+	create.imageType       = vk::ImageType::e2D;
+	create.extent          = {info.width, info.height, 1};
+	create.mipLevels       = 1;
+	create.arrayLayers     = 1;
+	create.format          = info.format;
+	create.tiling          = vk::ImageTiling::eOptimal;
+	create.initialLayout   = vk::ImageLayout::eUndefined;
+	create.flags           = RenderTargetCreateFlags(info.format);
+	create.usage           = RenderTargetUsage(ctx, info.format, create.flags);
+	create.sharingMode     = vk::SharingMode::eExclusive;
+	create.samples         = vk::SampleCountFlagBits::e1;
+	image->memory.property = vk::MemoryPropertyFlagBits::eDeviceLocal;
+	if (!VulkanCreateImage(ctx, create, image)) {
 		EXIT("TextureCache: failed to create video-out image, addr=0x%016" PRIx64
 		     " extent=%ux%u format=%d\n",
 		     info.address, info.width, info.height, static_cast<int>(info.format));
 	}
-	image->memory = *memory;
 	ImageViewOps::CreateVideoOutViews(ctx, image);
 	return image;
 }
@@ -374,10 +366,10 @@ void UploadVideoOut(GraphicContext* ctx, VideoOutVulkanImage* image, const Video
 		     info.address, info.metadata_address, info.dcc_control);
 	}
 	if (refresh) {
-		VulkanDeviceWaitIdle(ctx);
+		Transfer::WaitForGraphicsIdle(ctx);
 	}
 	image->layout = vk::ImageLayout::eUndefined;
-	UtilScratchBuffer scratch(info.size);
+	Transfer::ScratchBuffer scratch(info.size);
 	TileConvertTiledToLinearRenderTarget(
 	    scratch.Data(), reinterpret_cast<const void*>(info.address), info.width, info.height,
 	    info.pitch, info.bytes_per_element, info.size);
@@ -387,16 +379,12 @@ void UploadVideoOut(GraphicContext* ctx, VideoOutVulkanImage* image, const Video
 			std::swap(pixels[i], pixels[i + 2]);
 		}
 	}
-	UtilFillImage(ctx, image, scratch.Data(), info.size, info.pitch, vk::ImageLayout::eGeneral);
+	Transfer::UploadImage(ctx, image, scratch.Data(), info.size, info.pitch,
+	                      vk::ImageLayout::eGeneral);
 }
 
 GpuTextureVulkanImage* CreateDummyTexture(GraphicContext* ctx, bool uint_format, bool image_3d,
-                                          bool storage, VulkanMemory* memory) {
-	if (memory == nullptr || memory->allocation != nullptr) {
-		EXIT("TextureCache: invalid dummy texture memory slot, slot=%p allocation=%p storage=%d\n",
-		     static_cast<const void*>(memory),
-		     memory == nullptr ? nullptr : static_cast<const void*>(memory->allocation), storage);
-	}
+                                          bool storage) {
 	auto* image  = storage ? static_cast<GpuTextureVulkanImage*>(new StorageTextureVulkanImage)
 	                       : new TextureVulkanImage;
 	auto  usage  = storage ? TextureFormatUsage::Storage : TextureFormatUsage::Sampled;
@@ -404,67 +392,50 @@ GpuTextureVulkanImage* CreateDummyTexture(GraphicContext* ctx, bool uint_format,
 	auto  owner  = storage ? "DummyStorageTexture" : "DummySampledTexture";
 
 	auto params     = MakeDummyTextureParams(uint_format, image_3d, usage, owner);
-	auto components = TextureCreateImage(ctx, image, memory, params);
+	auto components = TextureCreateImage(ctx, image, params);
 
 	static constexpr uint32_t zero = 0;
-	UtilFillImage(ctx, image, &zero, sizeof(zero), 1, layout);
+	Transfer::UploadImage(ctx, image, &zero, sizeof(zero), 1, layout);
 	TextureCreateImageViews(ctx, image, components, params.type, 0, params.base_level,
 	                        params.levels, params.depth, params.allow_cube_view, params.view_usage);
 	return image;
 }
 
-void Destroy(GraphicContext* ctx, GpuTextureVulkanImage* image, VulkanMemory* memory) {
-	KYTY_PROFILER_BLOCK("TextureCache::DeleteGpuTexture");
+void Destroy(GraphicContext* ctx, VulkanImage* image) {
+	KYTY_PROFILER_BLOCK("TextureCache::DeleteImage");
+	EXIT_IF(ctx == nullptr || image == nullptr || g_render_ctx == nullptr);
 
-	EXIT_IF(ctx == nullptr);
-	EXIT_IF(image == nullptr);
+	switch (image->type) {
+		case VulkanImageType::RenderTexture:
+		case VulkanImageType::VideoOut:
+			g_render_ctx->GetFramebufferCache()->FreeFramebufferByColor(image);
+			break;
+		case VulkanImageType::DepthStencil:
+			g_render_ctx->GetFramebufferCache()->FreeFramebufferByDepth(
+			    static_cast<DepthStencilVulkanImage*>(image));
+			break;
+		case VulkanImageType::Texture:
+		case VulkanImageType::StorageTexture: break;
+		case VulkanImageType::Unknown: EXIT("cannot destroy an untyped Vulkan image\n");
+	}
 
 	ImageViewOps::DestroyViews(ctx, image);
-	VulkanDeleteImage(ctx, image, memory);
+	VulkanDeleteImage(ctx, image);
 
 	switch (image->type) {
 		case VulkanImageType::Texture: delete static_cast<TextureVulkanImage*>(image); break;
 		case VulkanImageType::StorageTexture:
 			delete static_cast<StorageTextureVulkanImage*>(image);
 			break;
-		default: EXIT("unsupported gpu texture image type: %d\n", static_cast<int>(image->type));
+		case VulkanImageType::RenderTexture:
+			delete static_cast<RenderTextureVulkanImage*>(image);
+			break;
+		case VulkanImageType::DepthStencil:
+			delete static_cast<DepthStencilVulkanImage*>(image);
+			break;
+		case VulkanImageType::VideoOut: delete static_cast<VideoOutVulkanImage*>(image); break;
+		case VulkanImageType::Unknown: EXIT("cannot delete an untyped Vulkan image\n");
 	}
-}
-
-void Destroy(GraphicContext* ctx, RenderTextureVulkanImage* image, VulkanMemory* memory) {
-	KYTY_PROFILER_BLOCK("TextureCache::DeleteRenderTexture");
-
-	EXIT_IF(ctx == nullptr);
-	EXIT_IF(image == nullptr);
-
-	g_render_ctx->GetFramebufferCache()->FreeFramebufferByColor(image);
-	ImageViewOps::DestroyViews(ctx, image);
-	VulkanDeleteImage(ctx, image, memory);
-	delete image;
-}
-
-void Destroy(GraphicContext* ctx, DepthStencilVulkanImage* image, VulkanMemory* memory) {
-	KYTY_PROFILER_BLOCK("TextureCache::DeleteDepthStencil");
-
-	EXIT_IF(ctx == nullptr);
-	EXIT_IF(image == nullptr);
-
-	g_render_ctx->GetFramebufferCache()->FreeFramebufferByDepth(image);
-	ImageViewOps::DestroyViews(ctx, image);
-	VulkanDeleteImage(ctx, image, memory);
-	delete image;
-}
-
-void Destroy(GraphicContext* ctx, VideoOutVulkanImage* image, VulkanMemory* memory) {
-	KYTY_PROFILER_BLOCK("TextureCache::DeleteVideoOut");
-
-	EXIT_IF(ctx == nullptr);
-	EXIT_IF(image == nullptr);
-
-	g_render_ctx->GetFramebufferCache()->FreeFramebufferByColor(image);
-	ImageViewOps::DestroyViews(ctx, image);
-	VulkanDeleteImage(ctx, image, memory);
-	delete image;
 }
 
 } // namespace ImageOps

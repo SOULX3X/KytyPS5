@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
 #include "graphics/host_gpu/vulkanInstance.h"
 
+#include <array>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -42,8 +43,9 @@ struct VulkanCommandPool {
 };
 
 struct GraphicContext: public VulkanInstance {
-	uint32_t screen_width  = 0;
-	uint32_t screen_height = 0;
+	uint32_t                              screen_width  = 0;
+	uint32_t                              screen_height = 0;
+	std::array<Common::Mutex, QUEUES_NUM> queue_mutexes;
 };
 
 struct VulkanMemory {

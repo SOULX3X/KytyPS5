@@ -8,7 +8,6 @@
 
 namespace Libs::Graphics {
 
-struct ShaderAddressWriteRange;
 struct ShaderStageRuntime;
 
 struct ShaderBufferWriteRange {
@@ -26,7 +25,6 @@ vk::BufferMemoryBarrier MakeGdsDependency(const VulkanBuffer& buffer);
 std::vector<ShaderBufferWriteRange>
 CollectShaderBufferWrites(const ShaderRecompiler::IR::Program&          program,
                           const ShaderRecompiler::IR::ResourceSnapshot& resources);
-bool MarkShaderAddressWrites(const std::vector<ShaderAddressWriteRange>& writes);
 bool HasShaderBufferWrites(const ShaderStageRuntime& runtime);
 void ShaderWriteBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags source_stages);
 

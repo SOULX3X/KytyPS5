@@ -14,15 +14,15 @@
 #include "graphics/host_gpu/objects/label.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/descriptorCache.h"
+#include "graphics/host_gpu/renderer/descriptors.h"
 #include "graphics/host_gpu/renderer/framebufferCache.h"
 #include "graphics/host_gpu/renderer/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipelineCache.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
-#include "graphics/host_gpu/renderer/renderInternal.h"
 #include "graphics/host_gpu/renderer/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/shaderSubgroup.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ShaderIR.h"
@@ -528,15 +528,15 @@ void RenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context
 
 	for (;;) {
 		const auto recording_generation = buffer->GetRecordingGeneration();
-		auto       vk_buffer            = buffer->GetPool()->buffers[buffer->GetIndex()];
+		auto       vk_buffer            = buffer->Handle();
 		auto*      pipeline             = g_render_ctx->GetPipelineCache()->CreateComputePipeline(
 		    &input_info, &sh_ctx->GetCs(), cs_shader);
 
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->pipeline);
 
-		const auto address_writes = BindDescriptors(
-		    submit_id, buffer, vk::PipelineBindPoint::eCompute, pipeline->pipeline_layout,
-		    input_info.stage, vk::ShaderStageFlagBits::eCompute, DescriptorCache::Stage::Compute);
+		BindDescriptors(submit_id, buffer, vk::PipelineBindPoint::eCompute,
+		                pipeline->pipeline_layout, input_info.stage,
+		                vk::ShaderStageFlagBits::eCompute, DescriptorCache::Stage::Compute);
 		if (buffer->GetRecordingGeneration() != recording_generation) {
 			continue;
 		}
@@ -544,7 +544,6 @@ void RenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 
 		bool has_storage_writes = HasShaderBufferWrites(input_info.stage);
-		has_storage_writes      = MarkShaderAddressWrites(address_writes) || has_storage_writes;
 		has_storage_writes =
 		    std::any_of(
 		        program.info.images.begin(), program.info.images.end(),

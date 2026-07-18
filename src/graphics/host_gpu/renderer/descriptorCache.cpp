@@ -102,15 +102,10 @@ vk::DescriptorImageInfo MakeDescriptorImageInfo(const DescriptorCache::TextureBi
 
 } // namespace
 
-void DescriptorCache::Init() {
-	m_initialized = true;
-}
-
 vk::DescriptorSetLayout
 DescriptorCache::GetDescriptorSetLayoutInternal(GraphicContext* gctx, Stage stage,
                                                 const ShaderRecompiler::IR::Program& program) {
 	EXIT_IF(gctx == nullptr);
-	Init();
 	const auto key = LayoutKey(stage, program);
 	if (const auto found = m_descriptor_set_layouts.find(key);
 	    found != m_descriptor_set_layouts.end()) {
@@ -132,8 +127,8 @@ DescriptorCache::GetDescriptorSetLayoutInternal(GraphicContext* gctx, Stage stag
 	info.bindingCount              = static_cast<uint32_t>(bindings.size());
 	info.pBindings                 = bindings.data();
 	vk::DescriptorSetLayout layout = nullptr;
-	gctx->device.createDescriptorSetLayout(&info, nullptr, &layout);
-	EXIT_NOT_IMPLEMENTED(layout == nullptr);
+	const auto result = gctx->device.createDescriptorSetLayout(&info, nullptr, &layout);
+	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess || layout == nullptr);
 	m_descriptor_set_layouts.emplace(key, layout);
 	return layout;
 }
@@ -157,8 +152,8 @@ void DescriptorCache::CreatePool(GraphicContext* gctx) {
 	info.maxSets       = MaxSets;
 	const auto pool_id = static_cast<int>(m_pools.size());
 	auto&      pool    = m_pools.emplace_back();
-	gctx->device.createDescriptorPool(&info, nullptr, &pool.pool);
-	EXIT_NOT_IMPLEMENTED(pool.pool == nullptr);
+	const auto result  = gctx->device.createDescriptorPool(&info, nullptr, &pool.pool);
+	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess || pool.pool == nullptr);
 	pool.next_free_pool = m_first_free_pool;
 	m_first_free_pool   = pool_id;
 }
@@ -198,7 +193,6 @@ VulkanDescriptorSet* DescriptorCache::Allocate(Stage                            
 				}
 				return new VulkanDescriptorSet {sets.back(), layout, pool_id};
 			}
-			pool.free         = false;
 			m_first_free_pool = pool.next_free_pool;
 			break;
 		}

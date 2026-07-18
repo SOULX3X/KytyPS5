@@ -7,7 +7,8 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/objects/textureCommon.h"
 #include "graphics/host_gpu/renderer/image.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
+#include "graphics/host_gpu/vulkanCommon.h"
 
 #include <vector>
 
@@ -26,7 +27,7 @@ static void UploadPromotedD16Depth(GraphicContext* ctx, DepthStencilVulkanImage*
 		     " host_slice=0x%016" PRIx64 " layers=%u\n",
 		     slice_size, host_slice_size, info.layers);
 	}
-	UtilScratchBuffer            host_linear(host_upload_size);
+	Transfer::ScratchBuffer      host_linear(host_upload_size);
 	std::vector<uint16_t>        guest_linear(slice_size / sizeof(uint16_t));
 	std::vector<BufferImageCopy> regions;
 	regions.reserve(info.layers);
@@ -48,14 +49,14 @@ static void UploadPromotedD16Depth(GraphicContext* ctx, DepthStencilVulkanImage*
 		region.aspect    = vk::ImageAspectFlagBits::eDepth;
 		regions.push_back(region);
 	}
-	UtilFillImage(ctx, image, host_linear.Data(), host_upload_size, regions,
-	              vk::ImageLayout::eDepthStencilAttachmentOptimal);
+	Transfer::UploadImage(ctx, image, host_linear.Data(), host_upload_size, regions,
+	                      vk::ImageLayout::eDepthStencilAttachmentOptimal);
 }
 
 void Tiler::DetileImage(GraphicContext* ctx, GpuTextureVulkanImage* image, const ImageInfo& info,
                         const BufferImageCopySource& source, bool refresh, bool storage) const {
 	if (refresh) {
-		VulkanDeviceWaitIdle(ctx);
+		Transfer::WaitForGraphicsIdle(ctx);
 	}
 	const bool array_texture  = TextureIsLayeredTexture(info.type);
 	const bool volume_texture = TextureIs3DTexture(info.type);
@@ -77,7 +78,7 @@ void Tiler::DetileImage(GraphicContext* ctx, DepthStencilVulkanImage* image,
                         const DepthTargetInfo& info, const BufferImageCopySource& source,
                         bool refresh, uint32_t base_layer) const {
 	if (refresh) {
-		VulkanDeviceWaitIdle(ctx);
+		Transfer::WaitForGraphicsIdle(ctx);
 	}
 	if (DepthAspectTransferBytes(info.format) != info.bytes_per_element) {
 		switch (info.format) {
@@ -93,7 +94,7 @@ void Tiler::DetileImage(GraphicContext* ctx, DepthStencilVulkanImage* image,
 		}
 	}
 	const auto                   slice_size = info.size / info.layers;
-	UtilScratchBuffer            linear(info.size);
+	Transfer::ScratchBuffer      linear(info.size);
 	std::vector<BufferImageCopy> regions;
 	regions.reserve(info.layers);
 	for (uint32_t layer = 0; layer < info.layers; layer++) {
@@ -110,8 +111,8 @@ void Tiler::DetileImage(GraphicContext* ctx, DepthStencilVulkanImage* image,
 		region.aspect    = vk::ImageAspectFlagBits::eDepth;
 		regions.push_back(region);
 	}
-	UtilFillImage(ctx, image, linear.Data(), info.size, regions,
-	              vk::ImageLayout::eDepthStencilAttachmentOptimal);
+	Transfer::UploadImage(ctx, image, linear.Data(), info.size, regions,
+	                      vk::ImageLayout::eDepthStencilAttachmentOptimal);
 }
 
 void Tiler::DetileStencil(GraphicContext* ctx, DepthStencilVulkanImage* image,
@@ -121,10 +122,10 @@ void Tiler::DetileStencil(GraphicContext* ctx, DepthStencilVulkanImage* image,
 	const auto stencil_pitch  = TileGetTexturePitch(
 	    stencil_format, info.width, 1, Prospero::GpuEnumValue(Prospero::TileMode::kDepth));
 	if (refresh) {
-		VulkanDeviceWaitIdle(ctx);
+		Transfer::WaitForGraphicsIdle(ctx);
 	}
 	const auto                   slice_size = info.stencil_size / info.layers;
-	UtilScratchBuffer            linear(info.stencil_size);
+	Transfer::ScratchBuffer      linear(info.stencil_size);
 	std::vector<BufferImageCopy> regions;
 	regions.reserve(info.layers);
 	for (uint32_t layer = 0; layer < info.layers; layer++) {
@@ -141,8 +142,8 @@ void Tiler::DetileStencil(GraphicContext* ctx, DepthStencilVulkanImage* image,
 		region.aspect    = vk::ImageAspectFlagBits::eStencil;
 		regions.push_back(region);
 	}
-	UtilFillImage(ctx, image, linear.Data(), info.stencil_size, regions,
-	              vk::ImageLayout::eDepthStencilAttachmentOptimal);
+	Transfer::UploadImage(ctx, image, linear.Data(), info.stencil_size, regions,
+	                      vk::ImageLayout::eDepthStencilAttachmentOptimal);
 }
 
 void Tiler::TileImage(void* dst, const void* src, const RenderTargetInfo& info) const {
@@ -185,10 +186,9 @@ void Tiler::TileImage(void* dst, const void* src, const ImageInfo& info) const {
 	auto layout = TextureCalcUploadLayout(info.format, info.width, info.height, info.levels,
 	                                      info.depth, info.pitch, info.tile, info.size, true, false,
 	                                      false, "StorageTextureReadback");
-	auto regions = TextureBuildUploadRegions(layout, Prospero::SurfaceFormat(info.format),
-	                                         info.width, info.height, info.depth, info.levels,
-	                                         false, false, TextureUploadDestination::MipLevels,
-	                                         TextureUploadSliceLayout::MipChainPerSlice);
+	auto regions = TextureBuildUploadRegions(
+	    layout, VulkanFormat(info.format), info.width, info.height, info.depth, info.levels, false,
+	    false, TextureUploadDestination::MipLevels, TextureUploadSliceLayout::MipChainPerSlice);
 	std::memset(dst, 0, info.size);
 	for (uint32_t level = 0; level < info.levels; level++) {
 		const auto& level_size = layout.level_sizes[level];

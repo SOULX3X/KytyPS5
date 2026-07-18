@@ -3,7 +3,6 @@
 #include "common/assert.h"
 #include "graphics/host_gpu/objects/textureCommon.h"
 #include "graphics/host_gpu/renderer/textureCache.h"
-#include "graphics/host_gpu/utils.h"
 
 #include <mutex>
 
@@ -11,28 +10,72 @@ namespace Libs::Graphics {
 
 namespace {
 
+void CreateView(GraphicContext* ctx, VulkanImage* image, int view_index,
+                vk::ImageViewType view_type, vk::ImageAspectFlags aspect_mask,
+                vk::ComponentMapping components, uint32_t base_array_layer, uint32_t base_mip_level,
+                uint32_t layer_count, uint32_t level_count,
+                vk::Format          view_format = vk::Format::eUndefined,
+                vk::ImageUsageFlags view_usage  = {}) {
+	if (ctx == nullptr || image == nullptr || view_index < 0 ||
+	    view_index >= VulkanImage::VIEW_MAX || image->image == nullptr ||
+	    image->image_view[view_index] != nullptr) {
+		EXIT("invalid image-view creation target: image=%p index=%d current_view=%d\n",
+		     static_cast<const void*>(image), view_index,
+		     image != nullptr && view_index >= 0 && view_index < VulkanImage::VIEW_MAX &&
+		         image->image_view[view_index] != nullptr);
+	}
+
+	vk::ImageViewUsageCreateInfo usage_info {};
+	usage_info.sType = vk::StructureType::eImageViewUsageCreateInfo;
+	usage_info.usage = view_usage;
+
+	vk::ImageViewCreateInfo create_info {};
+	create_info.sType      = vk::StructureType::eImageViewCreateInfo;
+	create_info.pNext      = view_usage ? &usage_info : nullptr;
+	create_info.image      = image->image;
+	create_info.viewType   = view_type;
+	create_info.format     = view_format != vk::Format::eUndefined ? view_format : image->format;
+	create_info.components = components;
+	create_info.subresourceRange.aspectMask     = aspect_mask;
+	create_info.subresourceRange.baseArrayLayer = base_array_layer;
+	create_info.subresourceRange.baseMipLevel   = base_mip_level;
+	create_info.subresourceRange.layerCount     = layer_count;
+	create_info.subresourceRange.levelCount     = level_count;
+
+	const auto result =
+	    ctx->device.createImageView(&create_info, nullptr, &image->image_view[view_index]);
+	if (result != vk::Result::eSuccess || image->image_view[view_index] == nullptr) {
+		EXIT("failed to create image view: result=%d image_format=%d view_format=%d index=%d\n",
+		     static_cast<int>(result), static_cast<int>(image->format),
+		     static_cast<int>(create_info.format), view_index);
+	}
+}
+
 void CreateRenderTargetView(GraphicContext* ctx, VulkanImage* image, int index,
                             vk::ComponentSwizzle r, vk::ComponentSwizzle g, vk::ComponentSwizzle b,
                             vk::ComponentSwizzle a, vk::ImageViewType type = vk::ImageViewType::e2D,
                             vk::Format          view_format = vk::Format::eUndefined,
                             vk::ImageUsageFlags view_usage = {}, uint32_t level_count = 0) {
 	const auto layer_count = type == vk::ImageViewType::e2DArray ? image->layers : 1u;
-	UtilCreateImageView(ctx, image, index, type, vk::ImageAspectFlagBits::eColor, {r, g, b, a}, 0,
-	                    0, layer_count, level_count == 0 ? image->mip_levels : level_count,
-	                    view_format, view_usage);
+	CreateView(ctx, image, index, type, vk::ImageAspectFlagBits::eColor, {r, g, b, a}, 0, 0,
+	           layer_count, level_count == 0 ? image->mip_levels : level_count, view_format,
+	           view_usage);
 }
 
 } // namespace
 
 namespace ImageViewOps {
 
-vk::ImageAspectFlags DepthAspectMask(vk::Format format) noexcept {
-	auto aspects = vk::ImageAspectFlags {vk::ImageAspectFlagBits::eDepth};
-	if (format == vk::Format::eD16UnormS8Uint || format == vk::Format::eD24UnormS8Uint ||
-	    format == vk::Format::eD32SfloatS8Uint) {
-		aspects |= vk::ImageAspectFlagBits::eStencil;
+vk::ImageAspectFlags DepthAspectMask(vk::Format format) {
+	switch (format) {
+		case vk::Format::eD16Unorm:
+		case vk::Format::eD32Sfloat: return vk::ImageAspectFlagBits::eDepth;
+		case vk::Format::eD16UnormS8Uint:
+		case vk::Format::eD24UnormS8Uint:
+		case vk::Format::eD32SfloatS8Uint:
+			return vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
+		default: EXIT("unsupported depth/stencil image format: %d\n", static_cast<int>(format));
 	}
-	return aspects;
 }
 
 bool FormatSupportsStorage(GraphicContext* ctx, vk::Format format) {
@@ -68,11 +111,11 @@ void CreateRenderTargetViews(GraphicContext* ctx, RenderTextureVulkanImage* imag
 }
 
 void CreateDepthViews(GraphicContext* ctx, DepthStencilVulkanImage* image) {
-	UtilCreateImageView(ctx, image, VulkanImage::VIEW_DEFAULT, vk::ImageViewType::e2D,
-	                    DepthAspectMask(image->format),
-	                    {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity,
-	                     vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity},
-	                    0, 0, 1, 1);
+	CreateView(ctx, image, VulkanImage::VIEW_DEFAULT, vk::ImageViewType::e2D,
+	           DepthAspectMask(image->format),
+	           {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity,
+	            vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity},
+	           0, 0, 1, 1);
 }
 
 void CreateVideoOutViews(GraphicContext* ctx, VideoOutVulkanImage* image) {
@@ -338,7 +381,7 @@ vk::ImageView TextureCache::GetStorageTextureSampledView(GraphicContext*        
 		     static_cast<const void*>(image), info.type, info.depth, info.base_level, info.levels,
 		     info.view_levels, image != nullptr ? image->mip_levels : 0, info.base_array);
 	}
-	const auto view_format = TextureGetFormat(info.format, TextureFormatUsage::Sampled);
+	const auto view_format = TextureGetFormat(info.format);
 	if (view_format != image->format && !IsRgba8SrgbReinterpretation(image->format, view_format) &&
 	    !IsR32UintFloatReinterpretation(image->format, view_format)) {
 		EXIT("TextureCache: incompatible sampled view of storage texture, image_format=%d"

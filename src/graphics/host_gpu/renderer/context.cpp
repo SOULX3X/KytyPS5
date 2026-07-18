@@ -10,19 +10,35 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/descriptorCache.h"
 #include "graphics/host_gpu/renderer/framebufferCache.h"
+#include "graphics/host_gpu/renderer/imageView.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vma.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/window.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <memory>
 namespace Libs::Graphics {
 static std::atomic<uint64_t> g_command_buffer_submit_seq = 0;
+
+static void RequireValidQueueId(int queue_id) {
+	EXIT_IF(queue_id < 0 || queue_id >= GraphicContext::QUEUES_NUM);
+}
+
+static void ResetNativeCommandBuffer(vk::CommandBuffer buffer) {
+	EXIT_IF(buffer == nullptr);
+	const auto result = buffer.reset(vk::CommandBufferResetFlagBits::eReleaseResources);
+	if (result != vk::Result::eSuccess) {
+		EXIT("failed to reset Vulkan command buffer: %s (%d)\n", VulkanToString(result).c_str(),
+		     static_cast<int>(result));
+	}
+}
+
 class CommandPool {
 public:
 	CommandPool() = default;
@@ -34,18 +50,19 @@ public:
 
 	KYTY_CLASS_NO_COPY(CommandPool);
 
-	VulkanCommandPool* GetPool(int id) {
-		if (m_pool[id] == nullptr) {
-			Create(id);
+	VulkanCommandPool* GetPool(int queue_id) {
+		RequireValidQueueId(queue_id);
+		if (m_pools[queue_id] == nullptr) {
+			Create(queue_id);
 		}
-		return m_pool[id];
+		return m_pools[queue_id];
 	}
 	void DeleteAll();
 
 private:
-	void Create(int id);
+	void Create(int queue_id);
 
-	VulkanCommandPool* m_pool[GraphicContext::QUEUES_NUM] = {};
+	std::array<VulkanCommandPool*, GraphicContext::QUEUES_NUM> m_pools {};
 };
 
 RenderContext*                  g_render_ctx = nullptr;
@@ -90,28 +107,28 @@ void GraphicsRenderCreateContext() {
 	g_render_ctx->SetGraphicCtx(WindowGetGraphicContext());
 }
 
-void CommandPool::Create(int id) {
-	auto* ctx = g_render_ctx->GetGraphicCtx();
+void CommandPool::Create(int queue_id) {
+	RequireValidQueueId(queue_id);
+	EXIT_IF(g_render_ctx == nullptr);
 
-	EXIT_IF(id < 0 || id >= GraphicContext::QUEUES_NUM);
-	auto*& pool = m_pool[id];
+	auto*  ctx  = g_render_ctx->GetGraphicCtx();
+	auto*& pool = m_pools[queue_id];
 	EXIT_IF(pool != nullptr);
 
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(ctx->device == nullptr);
-	EXIT_IF(ctx->queues[id].family == static_cast<uint32_t>(-1));
+	EXIT_IF(ctx->queues[queue_id].family == static_cast<uint32_t>(-1));
 
 	pool = new VulkanCommandPool;
 
 	vk::CommandPoolCreateInfo pool_info {};
 	pool_info.sType            = vk::StructureType::eCommandPoolCreateInfo;
 	pool_info.pNext            = nullptr;
-	pool_info.queueFamilyIndex = ctx->queues[id].family;
+	pool_info.queueFamilyIndex = ctx->queues[queue_id].family;
 	pool_info.flags            = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
 
-	ctx->device.createCommandPool(&pool_info, nullptr, &pool->pool);
-
-	EXIT_NOT_IMPLEMENTED(pool->pool == nullptr);
+	const auto result = ctx->device.createCommandPool(&pool_info, nullptr, &pool->pool);
+	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess || pool->pool == nullptr);
 
 	pool->buffers_count = 8;
 	pool->buffers       = std::make_unique<vk::CommandBuffer[]>(pool->buffers_count);
@@ -162,7 +179,7 @@ void CommandPool::Create(int id) {
 void CommandPool::DeleteAll() {
 	auto* ctx = g_render_ctx->GetGraphicCtx();
 
-	for (auto& pool: m_pool) {
+	for (auto& pool: m_pools) {
 		if (pool != nullptr) {
 			EXIT_IF(ctx == nullptr);
 			EXIT_IF(ctx->device == nullptr);
@@ -194,6 +211,14 @@ bool CommandBuffer::IsInvalid() const {
 	return true;
 }
 
+vk::CommandBuffer CommandBuffer::Handle() const {
+	EXIT_IF(IsInvalid());
+
+	const auto handle = m_pool->buffers[m_index];
+	EXIT_IF(handle == nullptr);
+	return handle;
+}
+
 void CommandBuffer::Allocate() {
 	EXIT_IF(!IsInvalid());
 
@@ -204,7 +229,7 @@ void CommandBuffer::Allocate() {
 	for (uint32_t i = 0; i < m_pool->buffers_count; i++) {
 		if (!m_pool->busy[i]) {
 			m_pool->busy[i] = true;
-			m_pool->buffers[i].reset(vk::CommandBufferResetFlagBits::eReleaseResources);
+			ResetNativeCommandBuffer(m_pool->buffers[i]);
 			m_index = i;
 			break;
 		}
@@ -223,9 +248,8 @@ void CommandBuffer::Free() {
 	m_host_stream.Release();
 
 	m_pool->busy[m_index] = false;
-	m_pool->buffers[m_index].reset(vk::CommandBufferResetFlagBits::eReleaseResources);
-	RecycleDescriptorsAfterFence();
-	m_fence_resources.ReleaseAfterFence();
+	ResetNativeCommandBuffer(m_pool->buffers[m_index]);
+	ReleaseResourcesAfterFence();
 	m_index = static_cast<uint32_t>(-1);
 
 	EXIT_NOT_IMPLEMENTED(!IsInvalid());
@@ -258,9 +282,7 @@ void CommandBuffer::RecycleDescriptorsAfterFence() {
 }
 
 void CommandBuffer::Begin() const {
-	EXIT_IF(IsInvalid());
-
-	auto buffer = m_pool->buffers[m_index];
+	auto buffer = Handle();
 
 	vk::CommandBufferBeginInfo begin_info {};
 	begin_info.sType            = vk::StructureType::eCommandBufferBeginInfo;
@@ -274,9 +296,7 @@ void CommandBuffer::Begin() const {
 }
 
 void CommandBuffer::End() const {
-	EXIT_IF(IsInvalid());
-
-	auto buffer = m_pool->buffers[m_index];
+	auto buffer = Handle();
 
 	auto result = buffer.end();
 
@@ -295,159 +315,48 @@ void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0,
 }
 
 void CommandBuffer::Execute() {
-	EXIT_IF(IsInvalid());
-	EXIT_IF(m_execute);
-
-	auto buffer = m_pool->buffers[m_index];
-	auto fence  = m_pool->fences[m_index];
-
-	vk::SubmitInfo submit_info {};
-	submit_info.sType                = vk::StructureType::eSubmitInfo;
-	submit_info.pNext                = nullptr;
-	submit_info.waitSemaphoreCount   = 0;
-	submit_info.pWaitSemaphores      = nullptr;
-	submit_info.pWaitDstStageMask    = nullptr;
-	submit_info.commandBufferCount   = 1;
-	submit_info.pCommandBuffers      = &buffer;
-	submit_info.signalSemaphoreCount = 0;
-	submit_info.pSignalSemaphores    = nullptr;
-
-	EXIT_IF(m_queue < 0 || m_queue >= GraphicContext::QUEUES_NUM);
-
-	const auto& queue = g_render_ctx->GetGraphicCtx()->queues[m_queue];
-
-	auto result = g_render_ctx->GetGraphicCtx()->device.resetFences(1, &fence);
-	if (result != vk::Result::eSuccess) {
-		LOGF("vkResetFences failed before submit: %s (%d)\n", VulkanToString(result).c_str(),
-		     static_cast<int>(result));
-	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-
-	if (queue.mutex != nullptr) {
-		queue.mutex->Lock();
-	}
-
-	if (Config::GraphicsDebugDumpEnabled()) {
-		LOGF("vkQueueSubmit begin: queue=%d index=%u debug_op=%u debug_submit=%" PRIu64
-		     " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
-		     m_queue, m_index, m_debug_op, m_debug_submit_id, m_debug_arg0, m_debug_arg1,
-		     m_debug_arg2, m_debug_arg3, m_debug_arg4);
-	}
-
-	result = queue.vk_queue.submit(1, &submit_info, fence);
-
-	if (queue.mutex != nullptr) {
-		queue.mutex->Unlock();
-	}
-
-	m_execute      = true;
-	m_fence_waited = false;
-	m_submit_seq   = g_command_buffer_submit_seq.fetch_add(1, std::memory_order_relaxed) + 1;
-
-	if (result != vk::Result::eSuccess) {
-		LOGF("vkQueueSubmit failed: %s (%d), queue=%d index=%u submit_seq=%" PRIu64
-		     " debug_op=%u debug_submit=%" PRIu64 " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
-		     VulkanToString(result).c_str(), static_cast<int>(result), m_queue, m_index,
-		     m_submit_seq, m_debug_op, m_debug_submit_id, m_debug_arg0, m_debug_arg1, m_debug_arg2,
-		     m_debug_arg3, m_debug_arg4);
-	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	Submit(nullptr, {}, nullptr);
 }
 
 void CommandBuffer::ExecuteWithSemaphore(vk::Semaphore signal_semaphore) {
-	EXIT_IF(IsInvalid());
-	EXIT_IF(m_execute);
-
-	auto buffer = m_pool->buffers[m_index];
-	auto fence  = m_pool->fences[m_index];
-
-	if (signal_semaphore == nullptr) {
-		signal_semaphore = m_pool->semaphores[m_index];
-	}
-
-	vk::SubmitInfo submit_info {};
-	submit_info.sType                = vk::StructureType::eSubmitInfo;
-	submit_info.pNext                = nullptr;
-	submit_info.waitSemaphoreCount   = 0;
-	submit_info.pWaitSemaphores      = nullptr;
-	submit_info.pWaitDstStageMask    = nullptr;
-	submit_info.commandBufferCount   = 1;
-	submit_info.pCommandBuffers      = &buffer;
-	submit_info.signalSemaphoreCount = 1;
-	submit_info.pSignalSemaphores    = &signal_semaphore;
-
-	EXIT_IF(m_queue < 0 || m_queue >= GraphicContext::QUEUES_NUM);
-
-	const auto& queue = g_render_ctx->GetGraphicCtx()->queues[m_queue];
-
-	auto result = g_render_ctx->GetGraphicCtx()->device.resetFences(1, &fence);
-	if (result != vk::Result::eSuccess) {
-		LOGF("vkResetFences failed before submit: %s (%d)\n", VulkanToString(result).c_str(),
-		     static_cast<int>(result));
-	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-
-	if (queue.mutex != nullptr) {
-		queue.mutex->Lock();
-	}
-
-	if (Config::GraphicsDebugDumpEnabled()) {
-		LOGF("vkQueueSubmit begin: queue=%d index=%u signal_semaphore=%p debug_op=%u"
-		     " debug_submit=%" PRIu64 " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
-		     m_queue, m_index, static_cast<void*>(signal_semaphore), m_debug_op, m_debug_submit_id,
-		     m_debug_arg0, m_debug_arg1, m_debug_arg2, m_debug_arg3, m_debug_arg4);
-	}
-
-	result = queue.vk_queue.submit(1, &submit_info, fence);
-
-	if (queue.mutex != nullptr) {
-		queue.mutex->Unlock();
-	}
-
-	m_execute      = true;
-	m_fence_waited = false;
-	m_submit_seq   = g_command_buffer_submit_seq.fetch_add(1, std::memory_order_relaxed) + 1;
-
-	if (result != vk::Result::eSuccess) {
-		LOGF("vkQueueSubmit failed: %s (%d), queue=%d index=%u submit_seq=%" PRIu64
-		     " debug_op=%u debug_submit=%" PRIu64 " args=%u,%u,%u,%u,0x%016" PRIx64 "\n",
-		     VulkanToString(result).c_str(), static_cast<int>(result), m_queue, m_index,
-		     m_submit_seq, m_debug_op, m_debug_submit_id, m_debug_arg0, m_debug_arg1, m_debug_arg2,
-		     m_debug_arg3, m_debug_arg4);
-	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	Submit(nullptr, {}, ResolveSignalSemaphore(signal_semaphore));
 }
 
 void CommandBuffer::ExecuteWithSemaphore(vk::Semaphore          wait_semaphore,
                                          vk::PipelineStageFlags wait_stage,
                                          vk::Semaphore          signal_semaphore) {
+	EXIT_IF(wait_semaphore == nullptr);
+	Submit(wait_semaphore, wait_stage, ResolveSignalSemaphore(signal_semaphore));
+}
+
+void CommandBuffer::Submit(vk::Semaphore wait_semaphore, vk::PipelineStageFlags wait_stage,
+                           vk::Semaphore signal_semaphore) {
+	RequireValidQueueId(m_queue);
 	EXIT_IF(IsInvalid());
 	EXIT_IF(m_execute);
-	EXIT_IF(wait_semaphore == nullptr);
 
-	auto buffer = m_pool->buffers[m_index];
-	auto fence  = m_pool->fences[m_index];
-
-	if (signal_semaphore == nullptr) {
-		signal_semaphore = m_pool->semaphores[m_index];
-	}
+	const bool has_wait   = wait_semaphore != nullptr;
+	const bool has_signal = signal_semaphore != nullptr;
+	auto       buffer     = Handle();
+	auto       fence      = m_pool->fences[m_index];
 
 	vk::SubmitInfo submit_info {};
 	submit_info.sType                = vk::StructureType::eSubmitInfo;
 	submit_info.pNext                = nullptr;
-	submit_info.waitSemaphoreCount   = 1;
-	submit_info.pWaitSemaphores      = &wait_semaphore;
-	submit_info.pWaitDstStageMask    = &wait_stage;
+	submit_info.waitSemaphoreCount   = has_wait ? 1u : 0u;
+	submit_info.pWaitSemaphores      = has_wait ? &wait_semaphore : nullptr;
+	submit_info.pWaitDstStageMask    = has_wait ? &wait_stage : nullptr;
 	submit_info.commandBufferCount   = 1;
 	submit_info.pCommandBuffers      = &buffer;
-	submit_info.signalSemaphoreCount = 1;
-	submit_info.pSignalSemaphores    = &signal_semaphore;
+	submit_info.signalSemaphoreCount = has_signal ? 1u : 0u;
+	submit_info.pSignalSemaphores    = has_signal ? &signal_semaphore : nullptr;
 
-	EXIT_IF(m_queue < 0 || m_queue >= GraphicContext::QUEUES_NUM);
+	auto* ctx = g_render_ctx->GetGraphicCtx();
+	EXIT_IF(ctx == nullptr);
+	EXIT_IF(ctx->device == nullptr);
+	const auto& queue = ctx->queues[m_queue];
 
-	const auto& queue = g_render_ctx->GetGraphicCtx()->queues[m_queue];
-
-	auto result = g_render_ctx->GetGraphicCtx()->device.resetFences(1, &fence);
+	auto result = ctx->device.resetFences(1, &fence);
 	if (result != vk::Result::eSuccess) {
 		LOGF("vkResetFences failed before submit: %s (%d)\n", VulkanToString(result).c_str(),
 		     static_cast<int>(result));
@@ -486,20 +395,16 @@ void CommandBuffer::ExecuteWithSemaphore(vk::Semaphore          wait_semaphore,
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 }
 
+vk::Semaphore CommandBuffer::ResolveSignalSemaphore(vk::Semaphore semaphore) const {
+	if (semaphore != nullptr) {
+		return semaphore;
+	}
+	EXIT_IF(IsInvalid());
+	return m_pool->semaphores[m_index];
+}
+
 void CommandBuffer::WaitForFence() {
-	const bool was_executed = m_execute;
-	WaitForFenceOnly();
-	if (was_executed) {
-		m_execute      = false;
-		m_fence_waited = false;
-		RecycleDescriptorsAfterFence();
-		m_fence_resources.ReleaseAfterFence();
-	}
-	for (auto* buffer: m_delete_after_fence) {
-		VulkanDeleteBuffer(g_render_ctx->GetGraphicCtx(), buffer);
-		delete buffer;
-	}
-	m_delete_after_fence.clear();
+	FinalizeFence(false);
 }
 
 void CommandBuffer::WaitForFenceOnly() {
@@ -521,19 +426,35 @@ void CommandBuffer::WaitForFenceOnly() {
 }
 
 void CommandBuffer::WaitForFenceAndReset() {
+	FinalizeFence(true);
+}
+
+void CommandBuffer::FinalizeFence(bool reset_recording) {
 	const bool was_executed = m_execute;
 	WaitForFenceOnly();
 	if (was_executed) {
 		m_execute      = false;
 		m_fence_waited = false;
-		m_pool->buffers[m_index].reset(vk::CommandBufferResetFlagBits::eReleaseResources);
-		m_recording_generation++;
+		if (reset_recording) {
+			ResetNativeCommandBuffer(m_pool->buffers[m_index]);
+			m_recording_generation++;
+		}
 	}
-	m_host_stream.Reset();
+	if (reset_recording) {
+		m_host_stream.Reset();
+	}
 	if (was_executed) {
-		RecycleDescriptorsAfterFence();
-		m_fence_resources.ReleaseAfterFence();
+		ReleaseResourcesAfterFence();
 	}
+	DeleteBuffersAfterFence();
+}
+
+void CommandBuffer::ReleaseResourcesAfterFence() {
+	RecycleDescriptorsAfterFence();
+	m_fence_resources.ReleaseAfterFence();
+}
+
+void CommandBuffer::DeleteBuffersAfterFence() {
 	for (auto* buffer: m_delete_after_fence) {
 		VulkanDeleteBuffer(g_render_ctx->GetGraphicCtx(), buffer);
 		delete buffer;
@@ -543,9 +464,7 @@ void CommandBuffer::WaitForFenceAndReset() {
 
 void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorInfo* colors,
                                     uint32_t requested_color_count, RenderDepthInfo* depth) const {
-	EXIT_IF(IsInvalid());
-
-	auto buffer = m_pool->buffers[m_index];
+	auto buffer = Handle();
 
 	EXIT_IF(framebuffer == nullptr);
 	EXIT_IF(colors == nullptr);
@@ -643,7 +562,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		image_memory_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.image               = depth->vulkan_buffer->image;
 		image_memory_barrier.subresourceRange.aspectMask =
-		    DepthStencilAspectMask(depth->vulkan_buffer->format);
+		    ImageViewOps::DepthAspectMask(depth->vulkan_buffer->format);
 		image_memory_barrier.subresourceRange.baseMipLevel   = 0;
 		image_memory_barrier.subresourceRange.levelCount     = 1;
 		image_memory_barrier.subresourceRange.baseArrayLayer = 0;
@@ -665,9 +584,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 }
 
 void CommandBuffer::EndRenderPass() const {
-	EXIT_IF(IsInvalid());
-
-	auto buffer = m_pool->buffers[m_index];
+	auto buffer = Handle();
 
 	buffer.endRenderPass();
 }

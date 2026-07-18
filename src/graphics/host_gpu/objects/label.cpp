@@ -4,6 +4,7 @@
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/vulkanCommon.h"
 
 #include <algorithm>
 #include <memory>
@@ -270,7 +271,7 @@ void LabelManager::Set(CommandBuffer* buffer, Label* label) {
 	submission.completion         = std::make_shared<LabelEvent>();
 	submission.completion->device = label->device;
 
-	auto vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto vk_buffer = buffer->Handle();
 
 	EXIT_NOT_IMPLEMENTED(vk_buffer == nullptr);
 
@@ -279,14 +280,22 @@ void LabelManager::Set(CommandBuffer* buffer, Label* label) {
 	create_info.pNext = nullptr;
 	create_info.flags = {};
 
-	label->device.createEvent(&create_info, nullptr, &submission.completion->event);
-	EXIT_NOT_IMPLEMENTED(submission.completion->event == nullptr);
+	const auto create_result =
+	    label->device.createEvent(&create_info, nullptr, &submission.completion->event);
+	if (create_result != vk::Result::eSuccess || submission.completion->event == nullptr) {
+		EXIT("failed to create label event: %s (%d)\n", VulkanToString(create_result).c_str(),
+		     static_cast<int>(create_result));
+	}
 	buffer->RetainResourceUntilFence(submission.completion);
 
 	// Labels can be reused before an earlier end-of-pipe event has been
 	// observed by the polling thread. Capture a separate Vulkan event and
 	// callback snapshot for each set so older writes are not lost.
-	label->device.resetEvent(submission.completion->event);
+	const auto reset_result = label->device.resetEvent(submission.completion->event);
+	if (reset_result != vk::Result::eSuccess) {
+		EXIT("failed to reset label event: %s (%d)\n", VulkanToString(reset_result).c_str(),
+		     static_cast<int>(reset_result));
+	}
 	vk_buffer.setEvent(submission.completion->event, vk::PipelineStageFlagBits::eBottomOfPipe);
 
 	label->submissions.push_back(submission);

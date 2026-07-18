@@ -22,10 +22,6 @@ struct Program;
 class CommandBuffer;
 struct ShaderStageRuntime;
 
-struct VulkanDescriptor {
-	vk::DescriptorSet descriptor_set = nullptr;
-};
-
 struct VulkanDescriptorSet {
 	vk::DescriptorSet       set     = nullptr;
 	vk::DescriptorSetLayout layout  = nullptr;
@@ -36,12 +32,6 @@ struct BufferView {
 	VulkanBuffer*  buffer = nullptr;
 	vk::DeviceSize offset = 0;
 	vk::DeviceSize range  = VK_WHOLE_SIZE;
-};
-
-struct ShaderAddressWriteRange {
-	VulkanBuffer* buffer  = nullptr;
-	uint64_t      address = 0;
-	uint64_t      size    = 0;
 };
 
 class DescriptorCache {
@@ -74,7 +64,7 @@ public:
 	};
 
 	DescriptorCache() { EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread()); }
-	virtual ~DescriptorCache() { KYTY_NOT_IMPLEMENTED; }
+	~DescriptorCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(DescriptorCache);
 
 	vk::DescriptorSetLayout GetDescriptorSetLayout(Stage                                stage,
@@ -87,10 +77,8 @@ private:
 	struct Pool {
 		vk::DescriptorPool pool           = nullptr;
 		int                next_free_pool = -1;
-		bool               free           = true;
 	};
 
-	void                 Init();
 	void                 CreatePool(GraphicContext* gctx);
 	VulkanDescriptorSet* Allocate(Stage stage, const ShaderRecompiler::IR::Program& program);
 	vk::DescriptorSetLayout
@@ -103,17 +91,12 @@ private:
 	std::unordered_map<vk::DescriptorSetLayout, std::vector<VulkanDescriptorSet*>>
 	                                                         m_free_sets_by_layout;
 	std::map<std::vector<uint32_t>, vk::DescriptorSetLayout> m_descriptor_set_layouts;
-	bool                                                     m_initialized = false;
 };
 
-const char*                          storage_usage_name(ShaderStorageUsage usage);
-vk::ImageAspectFlags                 DepthStencilAspectMask(vk::Format format);
-std::vector<ShaderAddressWriteRange> BindDescriptors(uint64_t submit_id, CommandBuffer* buffer,
-                                                     vk::PipelineBindPoint     pipeline_bind_point,
-                                                     vk::PipelineLayout        layout,
-                                                     const ShaderStageRuntime& runtime,
-                                                     vk::ShaderStageFlags      vk_stage,
-                                                     DescriptorCache::Stage    stage);
+void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer,
+                     vk::PipelineBindPoint pipeline_bind_point, vk::PipelineLayout layout,
+                     const ShaderStageRuntime& runtime, vk::ShaderStageFlags vk_stage,
+                     DescriptorCache::Stage stage);
 
 } // namespace Libs::Graphics
 

@@ -50,7 +50,7 @@ inline uint64_t render_pass_compat_id(uint32_t color_count, const vk::Format* co
 class FramebufferCache {
 public:
 	FramebufferCache() { EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread()); }
-	virtual ~FramebufferCache() { KYTY_NOT_IMPLEMENTED; }
+	~FramebufferCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(FramebufferCache);
 
 	VulkanFramebuffer* CreateFramebuffer(RenderColorInfo* colors, uint32_t color_count,
@@ -59,8 +59,6 @@ public:
 	void               FreeFramebufferByDepth(DepthStencilVulkanImage* image);
 
 private:
-	VideoOutVulkanImage* CreateDummyBuffer(vk::Format format, uint32_t width, uint32_t height);
-
 	struct Framebuffer {
 		VulkanFramebuffer* framebuffer                                      = nullptr;
 		uint64_t           image_id[RENDER_COLOR_ATTACHMENTS_MAX]           = {};
@@ -74,9 +72,8 @@ private:
 		bool               depth_read_only                                  = false;
 	};
 
-	Common::Mutex                     m_mutex;
-	std::vector<Framebuffer>          m_framebuffers;
-	std::vector<VideoOutVulkanImage*> m_dummy_buffers;
+	Common::Mutex            m_mutex;
+	std::vector<Framebuffer> m_framebuffers;
 };
 
 } // namespace Libs::Graphics

@@ -24,7 +24,6 @@ public:
 private:
 	struct Slot {
 		GpuTextureVulkanImage* image = nullptr;
-		VulkanMemory           memory {};
 	};
 
 	Common::Mutex       m_mutex;

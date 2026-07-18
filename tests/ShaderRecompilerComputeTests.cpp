@@ -20,12 +20,11 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/renderDraw.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
-#include "graphics/host_gpu/renderer/renderVertex.h"
 #include "graphics/host_gpu/renderer/resourceMutex.h"
 #include "graphics/host_gpu/renderer/sync.h"
 #include "graphics/host_gpu/renderer/textureCache.h"
 #include "graphics/host_gpu/renderer/tiler.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/BindingLayout.h"
 #include "graphics/shader/recompiler/ShaderDecoder.h"
@@ -2481,10 +2480,10 @@ private:
 
   void Destroy() {
     if (m_device != nullptr) {
-      m_device.waitIdle();
+      RequireVulkanSuccess(m_device.waitIdle(), "vkDeviceWaitIdle");
       if (m_runtime_context.allocator != nullptr) {
         GraphicsRenderReleaseThreadCommandPools();
-        UtilReleaseCachedResources(&m_runtime_context);
+        Transfer::ReleaseCachedResources(&m_runtime_context);
         vmaDestroyAllocator(m_runtime_context.allocator);
         m_runtime_context.allocator = nullptr;
       }
@@ -10664,8 +10663,8 @@ void CheckRenderTargetTileRoundTrip() {
               "layered render-target conversion crossed array slices");
     }
   }
-  const auto regions =
-      MakeLayeredImageBufferCopies(layers, storage.size, pitch, width, height);
+  const auto regions = Transfer::MakeLayeredImageBufferCopies(
+      layers, storage.size, pitch, width, height);
   Require("RenderTargetTileRoundTrip", "layered regions",
           regions.size() == layers && regions[0].offset == 0 &&
               regions[1].offset == storage.size &&

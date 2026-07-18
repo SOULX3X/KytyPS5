@@ -1,7 +1,6 @@
 #include "graphics/host_gpu/renderer/shaderResourceBarrier.h"
 
 #include "common/assert.h"
-#include "graphics/host_gpu/renderer/descriptorCache.h"
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderBindings.h"
 
@@ -106,13 +105,6 @@ CollectShaderBufferWrites(const ShaderRecompiler::IR::Program&          program,
 		}
 	}
 	return writes;
-}
-
-bool MarkShaderAddressWrites(const std::vector<ShaderAddressWriteRange>& writes) {
-	if (!writes.empty()) {
-		EXIT("shader address writes are unsupported\n");
-	}
-	return false;
 }
 
 bool HasShaderBufferWrites(const ShaderStageRuntime& runtime) {

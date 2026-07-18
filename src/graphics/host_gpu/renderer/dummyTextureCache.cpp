@@ -2,7 +2,7 @@
 
 #include "common/assert.h"
 #include "graphics/host_gpu/renderer/image.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 
 namespace Libs::Graphics {
 
@@ -20,11 +20,11 @@ DummyTextureCache::~DummyTextureCache() {
 		return;
 	}
 
-	VulkanDeviceWaitIdle(m_ctx);
+	Transfer::WaitForGraphicsIdle(m_ctx);
 	const auto destroy = [this](auto& slots) {
 		for (auto& slot: slots) {
 			if (slot.image != nullptr) {
-				ImageOps::Destroy(m_ctx, slot.image, &slot.memory);
+				ImageOps::Destroy(m_ctx, slot.image);
 				slot.image = nullptr;
 			}
 		}
@@ -49,8 +49,8 @@ VulkanImage* DummyTextureCache::Get(GraphicContext* ctx, Usage usage, bool uint_
 	auto& slots = usage == Usage::Storage ? m_storage : m_sampled;
 	auto& slot  = slots[DummyTextureIndex(uint_format, image_3d)];
 	if (slot.image == nullptr) {
-		slot.image = ImageOps::CreateDummyTexture(ctx, uint_format, image_3d,
-		                                          usage == Usage::Storage, &slot.memory);
+		slot.image =
+		    ImageOps::CreateDummyTexture(ctx, uint_format, image_3d, usage == Usage::Storage);
 	}
 	return slot.image;
 }
