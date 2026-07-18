@@ -64,6 +64,7 @@ struct ShaderBufferResource {
 	}
 	[[nodiscard]] uint8_t Format() const { return (fields[3] >> 12u) & 0x7Fu; }
 	[[nodiscard]] uint8_t OutOfBounds() const { return (fields[3] >> 28u) & 0x3u; }
+	[[nodiscard]] uint8_t Type() const { return (fields[3] >> 30u) & 0x3u; }
 };
 
 struct ShaderTextureResource {

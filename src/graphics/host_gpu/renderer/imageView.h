@@ -18,8 +18,13 @@ namespace Libs::Graphics {
 	    format == Prospero::GpuEnumValue(Prospero::BufferFormat::k16Float) ||
 	    format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32Float);
 	return swizzle == DstSel(4, 5, 6, 7) ||
-	       (single_channel && (swizzle == DstSel(4, 0, 0, 0) || swizzle == DstSel(4, 0, 0, 1))) ||
-	       (format == Prospero::GpuEnumValue(Prospero::BufferFormat::k8_8_8_8UNorm) &&
+	       (single_channel && (swizzle == DstSel(4, 0, 0, 0) ||
+	                           swizzle == DstSel(4, 0, 0, 1) ||
+	                           swizzle == DstSel(4, 4, 4, 4))) ||
+	       (format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32_32UInt) &&
+	        swizzle == DstSel(4, 5, 0, 1)) ||
+	       ((format == Prospero::GpuEnumValue(Prospero::BufferFormat::k8_8_8_8UNorm) ||
+	         format == Prospero::GpuEnumValue(Prospero::BufferFormat::k8_8_8_8UInt)) &&
 	        (swizzle == DstSel(4, 5, 6, 1) || swizzle == DstSel(6, 5, 4, 7))) ||
 	       (format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32_32_32_32Float) &&
 	        swizzle == DstSel(5, 6, 7, 4));
@@ -28,9 +33,12 @@ namespace Libs::Graphics {
 [[nodiscard]] inline bool IsSupportedStorageDepthTile(uint32_t format, uint32_t type,
                                                       uint32_t width, uint32_t height,
                                                       uint32_t depth) noexcept {
-	return format == Prospero::GpuEnumValue(Prospero::BufferFormat::k8UInt) &&
-	       type == Prospero::GpuEnumValue(Prospero::ImageType::kColor2DArray) && width == 1 &&
-	       height == 1 && depth == 1;
+	return (format == Prospero::GpuEnumValue(Prospero::BufferFormat::k8UInt) &&
+	        type == Prospero::GpuEnumValue(Prospero::ImageType::kColor2DArray) && width == 1 &&
+	        height == 1 && depth == 1) ||
+	       (format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32UInt) &&
+	        type == Prospero::GpuEnumValue(Prospero::ImageType::kColor2D) && width != 0 &&
+	        height != 0 && depth == 1);
 }
 
 [[noreturn]] inline void UnsupportedColorView(const char* usage, VkFormat image_format,
@@ -68,6 +76,11 @@ namespace Libs::Graphics {
 	return image_format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_UNDEFINED;
 }
 
+[[nodiscard]] inline VkFormat SrgbStorageViewFormat(VkFormat image_format) noexcept {
+	return image_format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM
+	                                               : BgraSrgbStorageViewFormat(image_format);
+}
+
 [[nodiscard]] inline bool IsBgraSrgbStorageView(VkFormat image_format, VkFormat view_format,
                                                 uint32_t swizzle) noexcept {
 	return view_format == BgraSrgbStorageViewFormat(image_format) && swizzle == DstSel(6, 5, 4, 7);
@@ -75,6 +88,11 @@ namespace Libs::Graphics {
 
 [[nodiscard]] inline int SelectSampledColorView(VkFormat image_format, VkFormat view_format,
                                                 uint32_t swizzle) noexcept {
+	if ((IsRgba16UintFloatReinterpretation(image_format, view_format) ||
+	     IsRgba8UnormUintReinterpretation(image_format, view_format)) &&
+	    swizzle == DstSel(4, 5, 6, 7)) {
+		return VulkanImage::VIEW_DEFAULT;
+	}
 	if (image_format == view_format) {
 		switch (swizzle) {
 			case DstSel(4, 5, 6, 7): return VulkanImage::VIEW_DEFAULT;
@@ -116,6 +134,14 @@ IsSupportedSampledDepthResource(const ShaderRecompiler::IR::ImageResource& resou
 	       !resource.written && !resource.atomic;
 }
 
+[[nodiscard]] inline bool IsSupportedSampledDepthUintResource(
+    const ShaderRecompiler::IR::ImageResource& resource) noexcept {
+	return resource.kind == ShaderRecompiler::IR::ResourceKind::ImageUint &&
+	       resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2D &&
+	       resource.mip_mode == ShaderRecompiler::IR::ImageMipMode::None && resource.read &&
+	       !resource.written && !resource.atomic && !resource.depth_compare;
+}
+
 [[nodiscard]] inline int SelectStorageColorView(VkFormat image_format, VkFormat view_format,
                                                 uint32_t swizzle) noexcept {
 	const bool single_channel =
@@ -124,8 +150,11 @@ IsSupportedSampledDepthResource(const ShaderRecompiler::IR::ImageResource& resou
 	    view_format == VK_FORMAT_R16_SFLOAT || view_format == VK_FORMAT_R32_SFLOAT;
 	const bool swizzle_ok =
 	    swizzle == DstSel(4, 5, 6, 7) ||
-	    (single_channel && (swizzle == DstSel(4, 0, 0, 0) || swizzle == DstSel(4, 0, 0, 1))) ||
-	    (view_format == VK_FORMAT_R8G8B8A8_UNORM &&
+	    (single_channel && (swizzle == DstSel(4, 0, 0, 0) ||
+	                        swizzle == DstSel(4, 0, 0, 1) ||
+	                        swizzle == DstSel(4, 4, 4, 4))) ||
+	    (view_format == VK_FORMAT_R32G32_UINT && swizzle == DstSel(4, 5, 0, 1)) ||
+	    ((view_format == VK_FORMAT_R8G8B8A8_UNORM || view_format == VK_FORMAT_R8G8B8A8_UINT) &&
 	     (swizzle == DstSel(4, 5, 6, 1) || swizzle == DstSel(6, 5, 4, 7))) ||
 	    (view_format == VK_FORMAT_R32G32B32A32_SFLOAT && swizzle == DstSel(5, 6, 7, 4));
 	if ((image_format != view_format &&

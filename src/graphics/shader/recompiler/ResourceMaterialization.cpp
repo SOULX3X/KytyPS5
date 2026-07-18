@@ -91,6 +91,15 @@ bool ValidateResourceSnapshot(const Program& program, const ResourceSnapshot& sn
 			}
 		}
 	}
+	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
+		const auto alias = program.info.buffers[i].image_alias;
+		if (alias != BufferResource::NoImageAlias && alias >= program.info.images.size()) {
+			if (error != nullptr) {
+				*error = fmt::format("buffer resource {} has invalid image alias {}", i, alias);
+			}
+			return false;
+		}
+	}
 	const auto CheckWidth = [&](const auto& values, uint32_t width, const char* kind) {
 		for (uint32_t i = 0; i < values.size(); i++) {
 			if (values[i].dword_count != width) {

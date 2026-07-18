@@ -126,7 +126,10 @@ void ResolveRenderDepthTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 	    z.htile_surface.prefetch_height == 0 && z.htile_surface.dst_outside_zero_to_one == 0 &&
 	    z.z_read_base_addr == 0 && z.z_write_base_addr == 0 && z.stencil_read_base_addr == 0 &&
 	    z.stencil_write_base_addr == 0 && z.htile_data_base_addr == 0 &&
-	    !z.z_info.tile_surface_enable && !z.size.valid && !z.width_height_valid &&
+	    // DB_DEPTH_SIZE_XY is independent state and may remain programmed after the attachment
+	    // formats and addresses are unbound. A zero encoding is the valid 1x1 value, so its
+	    // presence alone must not manufacture a depth attachment.
+	    !z.z_info.tile_surface_enable && !z.width_height_valid &&
 	    !z.pitch_height_valid && z.size.x_max == 0 && z.size.y_max == 0 &&
 	    z.pitch_div8_minus1 == 0 && z.height_div8_minus1 == 0 && z.slice_div64_minus1 == 0 &&
 	    z.width == 0 && z.height == 0;
@@ -215,7 +218,7 @@ void ResolveRenderDepthTarget(uint64_t submit_id, CommandBuffer* buffer, const H
 	} else if (z.htile_data_base_addr != 0) {
 		DepthFatal("HTile address without an enabled tile surface");
 	}
-	const bool size_xy_valid = z.size.valid && (z.size.x_max != 0 || z.size.y_max != 0);
+	const bool size_xy_valid = z.size.valid;
 	const bool wh_valid      = z.width_height_valid && z.width != 0 && z.height != 0;
 	if (!size_xy_valid && !wh_valid) {
 		DepthFatal("missing depth extent");

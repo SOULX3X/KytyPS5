@@ -323,7 +323,13 @@ inline constexpr std::array<VideoOutFormatPolicy, 6> VIDEO_OUT_FORMAT_POLICIES {
 	return false;
 }
 
-enum class DepthOverlap : uint8_t { None, RetireSampled, ExpandTarget, Unsupported };
+enum class DepthOverlap : uint8_t {
+	None,
+	RetireSampled,
+	ExpandTarget,
+	DiscardTarget,
+	Unsupported
+};
 enum class DepthTransitionSource : uint8_t { None, Guest, Native };
 enum class RenderTargetOverlap : uint8_t {
 	None,
@@ -338,16 +344,52 @@ enum class StorageSampledOverlap : uint8_t { None, ExactImage, Unsupported };
 enum class StorageSampledViewShape : uint8_t { Image2D, Image2DArray, Image3D, Unsupported };
 enum class StorageImageOverlap : uint8_t { None, RetireSampled, PageNeighbor, Unsupported };
 enum class HostWriteOverlap : uint8_t { None, InvalidateImage, Unsupported };
-enum class BufferImageBinding : uint8_t { Texture, VideoOut, RenderTarget, Unsupported };
+enum class BufferImageBinding : uint8_t {
+	Texture,
+	VideoOut,
+	RenderTarget,
+	StorageTexture,
+	DepthTarget,
+	Unsupported
+};
 enum class BufferImageWrite : uint8_t {
 	None,
 	InvalidateTexture,
 	InvalidateVideoOut,
+	InvalidateStorageTexture,
+	InvalidateDepthTarget,
+	InvalidateRenderTarget,
 	SynchronizeRenderTarget,
+	SynchronizeStorageTexture,
+	SynchronizeDepthTarget,
 	SynchronizeVideoOut,
 	Unsupported
 };
+
+enum class StorageBufferRebind : uint8_t { Reuse, RefreshFromBacking, Unsupported };
 enum class MetaImageOverlap : uint8_t { RetainSampled, RetireTarget, Unsupported };
+
+[[nodiscard]] inline constexpr uint32_t SelectImageBackingBaseLevel(bool storage,
+	                                                                 uint32_t view_base_level) {
+	// Storage descriptors select a per-mip view of one full allocation. Backing creation must not
+	// depend on which view happens to be bound first.
+	return storage ? 0u : view_base_level;
+}
+
+[[nodiscard]] inline constexpr bool IsDepthUintTextureReinterpretation(
+    VkFormat image_format, uint32_t guest_format, VkFormat view_format) noexcept {
+	switch (image_format) {
+		case VK_FORMAT_D32_SFLOAT:
+			return guest_format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32UInt) &&
+			       view_format == VK_FORMAT_R32_UINT;
+		default: return false;
+	}
+}
+
+[[nodiscard]] inline constexpr bool NeedsStaticSampledArrayView(bool shader_array,
+	                                                            bool dynamic_view_selected) {
+	return shader_array && !dynamic_view_selected;
+}
 
 [[nodiscard]] inline constexpr StorageSampledViewShape
 SelectStorageSampledViewShape(uint32_t type, uint32_t depth, uint32_t backing_layers) noexcept {
@@ -573,6 +615,53 @@ SelectDepthTransitionSource(bool depth_load_clear, bool sampled_native_available
 
 [[nodiscard]] inline bool IsRgba8SrgbReinterpretation(VkFormat cached, VkFormat requested) noexcept;
 
+[[nodiscard]] inline bool IsR32UintFloatReinterpretation(VkFormat cached,
+                                                         VkFormat requested) noexcept {
+	switch (cached) {
+		case VK_FORMAT_R32_UINT: return requested == VK_FORMAT_R32_SFLOAT;
+		case VK_FORMAT_R32_SFLOAT: return requested == VK_FORMAT_R32_UINT;
+		default: return false;
+	}
+}
+
+[[nodiscard]] inline bool IsRgba16UintFloatReinterpretation(VkFormat cached,
+	                                                         VkFormat requested) noexcept {
+	switch (cached) {
+		case VK_FORMAT_R16G16B16A16_SFLOAT:
+			return requested == VK_FORMAT_R16G16B16A16_UINT;
+		case VK_FORMAT_R16G16B16A16_UINT:
+			return requested == VK_FORMAT_R16G16B16A16_SFLOAT;
+		default: return false;
+	}
+}
+
+[[nodiscard]] inline bool IsRgba8UnormUintReinterpretation(VkFormat cached,
+	                                                        VkFormat requested) noexcept {
+	switch (cached) {
+		case VK_FORMAT_R8G8B8A8_UNORM: return requested == VK_FORMAT_R8G8B8A8_UINT;
+		case VK_FORMAT_R8G8B8A8_UINT: return requested == VK_FORMAT_R8G8B8A8_UNORM;
+		default: return false;
+	}
+}
+
+[[nodiscard]] inline bool IsSampledDepthExpansion(const ImageInfo& sampled,
+                                                  const DepthTargetInfo& target) noexcept {
+	const bool array_expansion =
+	    sampled.type == Prospero::GpuEnumValue(Prospero::ImageType::kColor2DArray) &&
+	    sampled.depth > 1 && target.size <= UINT64_MAX / sampled.depth &&
+	    sampled.size == target.size * sampled.depth && sampled.width == target.width &&
+	    sampled.height == target.height && sampled.pitch == target.pitch;
+	return sampled.address == target.address && sampled.size > target.size &&
+	       sampled.format == target.guest_format &&
+	       target.format == VK_FORMAT_D32_SFLOAT &&
+	       target.guest_format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32Float) &&
+	       target.bytes_per_element == 4 && target.stencil_address == 0 &&
+	       target.stencil_size == 0 && target.htile_address == 0 && target.htile_size == 0 &&
+	       target.layers == 1 && array_expansion &&
+	       sampled.base_level == 0 && sampled.levels == 1 && sampled.view_levels == 1 &&
+	       sampled.tile == target.tile_mode && sampled.base_array == 0;
+}
+
 [[nodiscard]] inline StorageSampledOverlap
 ClassifyStorageSampledOverlap(const ImageInfo& requested, const ImageInfo& cached,
                               VkFormat requested_view_format, VkFormat cached_image_format,
@@ -589,7 +678,8 @@ ClassifyStorageSampledOverlap(const ImageInfo& requested, const ImageInfo& cache
 	    requested.type == cached.type && requested.base_array == cached.base_array;
 	const bool compatible_format =
 	    (requested.format == cached.format && requested_view_format == cached_image_format) ||
-	    IsRgba8SrgbReinterpretation(cached_image_format, requested_view_format);
+	    IsRgba8SrgbReinterpretation(cached_image_format, requested_view_format) ||
+	    IsR32UintFloatReinterpretation(cached_image_format, requested_view_format);
 	return same_backing && compatible_format && cached_gpu_modified && !cached_cpu_dirty &&
 	               same_context
 	           ? StorageSampledOverlap::ExactImage
@@ -611,7 +701,7 @@ ClassifyHostWriteOverlap(uint64_t write_address, uint64_t write_size, uint64_t i
 [[nodiscard]] inline BufferImageWrite
 ClassifyBufferImageWrite(uint64_t buffer_address, uint64_t buffer_size, uint64_t image_address,
                          uint64_t image_size, BufferImageBinding binding, bool image_gpu_modified,
-                         bool buffer_formatted) {
+                         bool buffer_formatted, bool image_buffer_modified = false) {
 	if (!ImagePageRangesOverlap(buffer_address, buffer_size, image_address, image_size)) {
 		return BufferImageWrite::None;
 	}
@@ -619,6 +709,10 @@ ClassifyBufferImageWrite(uint64_t buffer_address, uint64_t buffer_size, uint64_t
 	const auto offset =
 	    buffer_address >= image_address ? buffer_address - image_address : UINT64_MAX;
 	const bool contained = offset <= image_size && buffer_size <= image_size - offset;
+	const auto image_offset =
+	    image_address >= buffer_address ? image_address - buffer_address : UINT64_MAX;
+	const bool image_contained =
+	    image_offset <= buffer_size && image_size <= buffer_size - image_offset;
 	const bool buffer_page_aligned =
 	    ((buffer_address | buffer_size) & (TRACKER_PAGE_SIZE - 1)) == 0;
 	const bool image_page_aligned = ((image_address | image_size) & (TRACKER_PAGE_SIZE - 1)) == 0;
@@ -634,12 +728,54 @@ ClassifyBufferImageWrite(uint64_t buffer_address, uint64_t buffer_size, uint64_t
 			return image_gpu_modified ? BufferImageWrite::SynchronizeVideoOut
 			                          : BufferImageWrite::InvalidateVideoOut;
 		case BufferImageBinding::RenderTarget:
-			return exact && buffer_page_aligned && buffer_formatted && image_gpu_modified
-			           ? BufferImageWrite::SynchronizeRenderTarget
+			if (!exact || !buffer_page_aligned || !buffer_formatted) {
+				return BufferImageWrite::Unsupported;
+			}
+			if (image_gpu_modified && !image_buffer_modified) {
+				return BufferImageWrite::SynchronizeRenderTarget;
+			}
+			return !image_gpu_modified && image_buffer_modified
+			           ? BufferImageWrite::InvalidateRenderTarget
+			           : BufferImageWrite::Unsupported;
+		case BufferImageBinding::StorageTexture:
+			if (!buffer_page_aligned || !image_page_aligned || !buffer_formatted) {
+				return BufferImageWrite::Unsupported;
+			}
+			if (contained && image_gpu_modified && !image_buffer_modified) {
+				return BufferImageWrite::SynchronizeStorageTexture;
+			}
+			return image_contained && !image_gpu_modified && image_buffer_modified
+			           ? BufferImageWrite::InvalidateStorageTexture
+			           : BufferImageWrite::Unsupported;
+		case BufferImageBinding::DepthTarget:
+			if (!exact || !buffer_page_aligned || !buffer_formatted) {
+				return BufferImageWrite::Unsupported;
+			}
+			if (image_gpu_modified && !image_buffer_modified) {
+				return BufferImageWrite::SynchronizeDepthTarget;
+			}
+			return !image_gpu_modified && image_buffer_modified
+			           ? BufferImageWrite::InvalidateDepthTarget
 			           : BufferImageWrite::Unsupported;
 		case BufferImageBinding::Unsupported: return BufferImageWrite::Unsupported;
 	}
 	return BufferImageWrite::Unsupported;
+}
+
+[[nodiscard]] inline StorageBufferRebind
+ClassifyStorageBufferRebind(bool buffer_overlap, bool cached_gpu_modified,
+                           bool cached_buffer_modified, bool tracker_gpu_modified,
+                           bool tracker_cpu_modified, bool coherent_guest_source) noexcept {
+	if (cached_gpu_modified != tracker_gpu_modified ||
+	    (tracker_gpu_modified && tracker_cpu_modified)) {
+		return StorageBufferRebind::Unsupported;
+	}
+	if (!cached_buffer_modified) {
+		return StorageBufferRebind::Reuse;
+	}
+	return buffer_overlap && !tracker_gpu_modified && coherent_guest_source
+	           ? StorageBufferRebind::RefreshFromBacking
+	           : StorageBufferRebind::Unsupported;
 }
 
 [[nodiscard]] inline DepthOverlap ClassifyDepthOverlap(const ImageInfo&       sampled,
@@ -724,10 +860,13 @@ ClassifyStorageRenderTargetOverlap(const ImageInfo& storage, VkFormat storage_fo
 
 [[nodiscard]] inline bool IsRgba8SrgbReinterpretation(VkFormat cached,
                                                       VkFormat requested) noexcept {
-	return (cached == VK_FORMAT_R8G8B8A8_UNORM && requested == VK_FORMAT_R8G8B8A8_SRGB) ||
-	       (cached == VK_FORMAT_R8G8B8A8_SRGB && requested == VK_FORMAT_R8G8B8A8_UNORM) ||
-	       (cached == VK_FORMAT_B8G8R8A8_UNORM && requested == VK_FORMAT_B8G8R8A8_SRGB) ||
-	       (cached == VK_FORMAT_B8G8R8A8_SRGB && requested == VK_FORMAT_B8G8R8A8_UNORM);
+	switch (cached) {
+		case VK_FORMAT_R8G8B8A8_UNORM: return requested == VK_FORMAT_R8G8B8A8_SRGB;
+		case VK_FORMAT_R8G8B8A8_SRGB: return requested == VK_FORMAT_R8G8B8A8_UNORM;
+		case VK_FORMAT_B8G8R8A8_UNORM: return requested == VK_FORMAT_B8G8R8A8_SRGB;
+		case VK_FORMAT_B8G8R8A8_SRGB: return requested == VK_FORMAT_B8G8R8A8_UNORM;
+		default: return false;
+	}
 }
 
 [[nodiscard]] inline bool IsCompatibleRenderTargetView(const RenderTargetInfo& cached,
@@ -854,9 +993,25 @@ ClassifyRenderTargetOverlap(const RenderTargetInfo& cached, bool cached_gpu_modi
 	}
 	const bool expand =
 	    requested.layers > cached.layers && IsCompatibleDepthTargetBacking(requested, cached);
-	return expand && cached_gpu_modified && !cached_buffer_modified && same_context
-	           ? DepthOverlap::ExpandTarget
-	           : DepthOverlap::Unsupported;
+	if (expand && cached_gpu_modified && !cached_buffer_modified && same_context) {
+		return DepthOverlap::ExpandTarget;
+	}
+	const bool exact_discard =
+	    requested.depth_load_clear && cached_gpu_modified && !cached_buffer_modified &&
+	    same_context && cached.address == requested.address && cached.size == requested.size &&
+	    cached.stencil_address == 0 && cached.stencil_size == 0 && cached.htile_address == 0 &&
+	    cached.htile_size == 0 && requested.stencil_address == 0 && requested.stencil_size == 0 &&
+	    requested.htile_address == 0 && requested.htile_size == 0;
+	return exact_discard ? DepthOverlap::DiscardTarget : DepthOverlap::Unsupported;
+}
+
+[[nodiscard]] inline bool CanRetireBufferOwnedDepthForRenderTarget(
+    const DepthTargetInfo& depth, bool gpu_modified, bool buffer_modified, bool same_context,
+    bool containing_buffer_source, const RenderTargetInfo& target) noexcept {
+	return !gpu_modified && buffer_modified && same_context && containing_buffer_source &&
+	       depth.address == target.address && depth.size == target.size &&
+	       depth.stencil_address == 0 && depth.stencil_size == 0 && depth.htile_address == 0 &&
+	       depth.htile_size == 0;
 }
 
 } // namespace Libs::Graphics

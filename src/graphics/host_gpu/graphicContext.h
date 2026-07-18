@@ -130,6 +130,10 @@ struct TextureVulkanImage: public GpuTextureVulkanImage {
 };
 
 struct StorageTextureVulkanImage: public GpuTextureVulkanImage {
+	struct StorageView {
+		uint32_t    base_level = 0;
+		VkImageView view       = nullptr;
+	};
 	struct SampledView {
 		VkFormat    format      = VK_FORMAT_UNDEFINED;
 		uint32_t    swizzle     = 0;
@@ -141,6 +145,8 @@ struct StorageTextureVulkanImage: public GpuTextureVulkanImage {
 	StorageTextureVulkanImage(): GpuTextureVulkanImage(VulkanImageType::StorageTexture) {}
 	std::mutex               sampled_view_mutex;
 	std::vector<SampledView> sampled_views;
+	std::mutex               storage_view_mutex;
+	std::vector<StorageView> storage_views;
 };
 
 struct RenderTextureVulkanImage: public VulkanImage {

@@ -83,7 +83,11 @@ public:
 	[[nodiscard]] VkImageView GetStorageTextureSampledView(GraphicContext*            ctx,
 	                                                       StorageTextureVulkanImage* image,
 	                                                       const ImageInfo&           info);
-	[[nodiscard]] DepthStencilVulkanImage* FindDepthTargetByRange(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] VkImageView GetStorageTextureStorageView(GraphicContext* ctx,
+	                                                       StorageTextureVulkanImage* image,
+	                                                       uint32_t base_level);
+	[[nodiscard]] DepthStencilVulkanImage* FindDepthTargetByRange(uint64_t vaddr, uint64_t size,
+	                                                            bool allow_containing_sampled = false);
 	[[nodiscard]] bool                     HasPageOverlap(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool                     HasRangeOverlap(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool HasGpuModifiedRangeOverlap(uint64_t vaddr, uint64_t size);
@@ -129,11 +133,15 @@ private:
 	void                       MarkSampledAliasesCpuDirtyLocked(uint64_t vaddr, uint64_t size);
 	void RetireSampledTargetAliases(GraphicContext* ctx, const ImageInfo& requested);
 	void RetireStoragePageNeighbors(GraphicContext* ctx, const ImageInfo& requested);
+	void RetireStorageDepthAliasLocked(GraphicContext* ctx, const ImageInfo& requested);
 	void RequireRetirementIsolation(const std::vector<CachedImage*>& retire, const char* operation,
 	                                uint64_t address, uint64_t size) const;
 	void RetireImages(const std::vector<CachedImage*>& retire,
 	                  const CachedImage*               native_image_source = nullptr);
-	void SynchronizeColorImageToBufferLocked(CachedImage& cached);
+	void SynchronizeColorImageToBufferLocked(CachedImage& cached, uint64_t write_address,
+	                                         uint64_t write_size);
+	void SynchronizeDepthImageToBufferLocked(CachedImage& cached, uint64_t write_address,
+	                                         uint64_t write_size);
 
 	Common::Mutex                             m_dummy_mutex;
 	std::array<VulkanImage*, 4>               m_dummy_sampled_textures {};

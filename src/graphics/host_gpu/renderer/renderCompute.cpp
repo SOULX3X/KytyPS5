@@ -111,7 +111,7 @@ bool ResolveHtileClearTarget(const HW::DepthRenderTarget& z, uint64_t descriptor
 		}
 	}
 
-	const bool size_xy_valid = z.size.valid && (z.size.x_max != 0 || z.size.y_max != 0);
+	const bool size_xy_valid = z.size.valid;
 	const bool wh_valid      = z.width_height_valid && z.width != 0 && z.height != 0;
 	if (!size_xy_valid && !wh_valid) {
 		// Prospero emits an exact full-surface metadata descriptor even
@@ -280,18 +280,6 @@ static bool TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input, cons
 	ValidateFullHtileClearDispatch(input, metadata_descriptor, group_x, group_y, group_z, mode);
 	if (!cache->ClearMeta(target.address)) {
 		EXIT("failed to record HTile compute clear\n");
-	}
-	const bool descriptor_backed =
-	    current_references != 0 && !z.size.valid && !z.width_height_valid && !z.pitch_height_valid;
-	const uint32_t source_bit = current_references == 0 ? 1u : descriptor_backed ? 2u : 4u;
-	static std::atomic<uint32_t> logged_sources {0};
-	if ((logged_sources.fetch_or(source_bit, std::memory_order_relaxed) & source_bit) == 0) {
-		LOGF("HTileClear: native virtual clear source=%s shader=0x%016" PRIx64 " addr=0x%016" PRIx64
-		     " size=0x%016" PRIx64 "\n",
-		     current_references == 0 ? "registered"
-		     : descriptor_backed     ? "descriptor"
-		                             : "derived",
-		     program.shader_hash, target.address, target.size);
 	}
 	return true;
 }
