@@ -4,12 +4,12 @@
 #include "common/assert.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/host_gpu/regionDefinitions.h"
+#include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
 #include <bit>
 #include <cmath>
 #include <cstdint>
-#include <vulkan/vulkan_core.h>
 
 namespace Libs::Graphics {
 
@@ -31,34 +31,34 @@ struct ImageInfo {
 };
 
 struct RenderTargetInfo {
-	uint64_t address           = 0;
-	uint64_t size              = 0;
-	VkFormat format            = VK_FORMAT_UNDEFINED;
-	uint32_t width             = 0;
-	uint32_t height            = 0;
-	uint32_t pitch             = 0;
-	uint32_t bytes_per_element = 0;
-	uint32_t tile_mode         = 0;
-	uint32_t levels            = 1;
-	uint32_t layers            = 1;
+	uint64_t   address           = 0;
+	uint64_t   size              = 0;
+	vk::Format format            = vk::Format::eUndefined;
+	uint32_t   width             = 0;
+	uint32_t   height            = 0;
+	uint32_t   pitch             = 0;
+	uint32_t   bytes_per_element = 0;
+	uint32_t   tile_mode         = 0;
+	uint32_t   levels            = 1;
+	uint32_t   layers            = 1;
 };
 
 // Common image-to-buffer copy description. Storage images and render targets keep distinct
 // cache records today, but downloads should consume one normalized layout just as uploads do.
 struct ColorImageTransferInfo {
-	uint64_t address           = 0;
-	uint64_t size              = 0;
-	VkFormat format            = VK_FORMAT_UNDEFINED;
-	uint32_t width             = 0;
-	uint32_t height            = 0;
-	uint32_t pitch             = 0;
-	uint32_t bytes_per_element = 0;
-	uint32_t tile_mode         = 0;
-	uint32_t levels            = 1;
+	uint64_t   address           = 0;
+	uint64_t   size              = 0;
+	vk::Format format            = vk::Format::eUndefined;
+	uint32_t   width             = 0;
+	uint32_t   height            = 0;
+	uint32_t   pitch             = 0;
+	uint32_t   bytes_per_element = 0;
+	uint32_t   tile_mode         = 0;
+	uint32_t   levels            = 1;
 };
 
 [[nodiscard]] inline ColorImageTransferInfo
-MakeColorImageTransferInfo(const ImageInfo& info, VkFormat format,
+MakeColorImageTransferInfo(const ImageInfo& info, vk::Format format,
                            uint32_t bytes_per_element) noexcept {
 	return {info.address, info.size,         format,    info.width, info.height,
 	        info.pitch,   bytes_per_element, info.tile, info.levels};
@@ -72,48 +72,48 @@ MakeColorImageTransferInfo(const RenderTargetInfo& info) noexcept {
 }
 
 struct DepthTargetInfo {
-	uint64_t address                  = 0;
-	uint64_t size                     = 0;
-	uint64_t stencil_address          = 0;
-	uint64_t stencil_size             = 0;
-	uint64_t htile_address            = 0;
-	uint64_t htile_size               = 0;
-	VkFormat format                   = VK_FORMAT_UNDEFINED;
-	uint32_t guest_format             = 0;
-	uint32_t width                    = 0;
-	uint32_t height                   = 0;
-	uint32_t pitch                    = 0;
-	uint32_t bytes_per_element        = 0;
-	uint32_t tile_mode                = 0;
-	uint32_t layers                   = 1;
-	bool     depth_load_clear         = false;
-	bool     stencil_load_clear       = false;
-	bool     stencil_access           = false;
-	bool     stencil_htile_compressed = false;
+	uint64_t   address                  = 0;
+	uint64_t   size                     = 0;
+	uint64_t   stencil_address          = 0;
+	uint64_t   stencil_size             = 0;
+	uint64_t   htile_address            = 0;
+	uint64_t   htile_size               = 0;
+	vk::Format format                   = vk::Format::eUndefined;
+	uint32_t   guest_format             = 0;
+	uint32_t   width                    = 0;
+	uint32_t   height                   = 0;
+	uint32_t   pitch                    = 0;
+	uint32_t   bytes_per_element        = 0;
+	uint32_t   tile_mode                = 0;
+	uint32_t   layers                   = 1;
+	bool       depth_load_clear         = false;
+	bool       stencil_load_clear       = false;
+	bool       stencil_access           = false;
+	bool       stencil_htile_compressed = false;
 };
 
 struct DepthFormatPolicy {
-	Prospero::DepthFormat   depth_format;
-	Prospero::BufferFormat  guest_format;
-	uint32_t                bytes_per_element;
-	VkFormat                sampled_view_format;
-	VkFormat                depth_attachment_format;
-	std::array<VkFormat, 3> stencil_attachment_formats;
+	Prospero::DepthFormat     depth_format;
+	Prospero::BufferFormat    guest_format;
+	uint32_t                  bytes_per_element;
+	vk::Format                sampled_view_format;
+	vk::Format                depth_attachment_format;
+	std::array<vk::Format, 3> stencil_attachment_formats;
 };
 
 inline constexpr std::array<DepthFormatPolicy, 2> DEPTH_FORMAT_POLICIES {{
     {Prospero::DepthFormat::kZ16,
      Prospero::BufferFormat::k16UNorm,
      2,
-     VK_FORMAT_R16_UNORM,
-     VK_FORMAT_D16_UNORM,
-     {VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT}},
+     vk::Format::eR16Unorm,
+     vk::Format::eD16Unorm,
+     {vk::Format::eD16UnormS8Uint, vk::Format::eD24UnormS8Uint, vk::Format::eD32SfloatS8Uint}},
     {Prospero::DepthFormat::kZ32F,
      Prospero::BufferFormat::k32Float,
      4,
-     VK_FORMAT_R32_SFLOAT,
-     VK_FORMAT_D32_SFLOAT,
-     {VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED}},
+     vk::Format::eR32Sfloat,
+     vk::Format::eD32Sfloat,
+     {vk::Format::eD32SfloatS8Uint, vk::Format::eUndefined, vk::Format::eUndefined}},
 }};
 
 [[nodiscard]] inline constexpr const DepthFormatPolicy*
@@ -137,53 +137,53 @@ FindGuestDepthFormatPolicy(uint32_t guest_format) noexcept {
 }
 
 [[nodiscard]] inline constexpr bool IsStencilAttachmentFormat(const DepthFormatPolicy& policy,
-                                                              VkFormat format) noexcept {
+                                                              vk::Format format) noexcept {
 	for (const auto candidate: policy.stencil_attachment_formats) {
-		if (candidate != VK_FORMAT_UNDEFINED && candidate == format) {
+		if (candidate != vk::Format::eUndefined && candidate == format) {
 			return true;
 		}
 	}
 	return false;
 }
 
-[[nodiscard]] inline constexpr VkFormat DepthAttachmentFormat(const DepthFormatPolicy& policy,
-                                                              bool has_stencil) noexcept {
+[[nodiscard]] inline constexpr vk::Format DepthAttachmentFormat(const DepthFormatPolicy& policy,
+                                                                bool has_stencil) noexcept {
 	return has_stencil ? policy.stencil_attachment_formats.front() : policy.depth_attachment_format;
 }
 
-[[nodiscard]] inline constexpr VkFormat DepthAttachmentFormat(uint32_t depth_format,
-                                                              uint32_t stencil_format) noexcept {
+[[nodiscard]] inline constexpr vk::Format DepthAttachmentFormat(uint32_t depth_format,
+                                                                uint32_t stencil_format) noexcept {
 	bool has_stencil = false;
 	switch (static_cast<Prospero::StencilFormat>(stencil_format)) {
 		case Prospero::StencilFormat::kInvalid: break;
 		case Prospero::StencilFormat::k8UInt: has_stencil = true; break;
-		default: return VK_FORMAT_UNDEFINED;
+		default: return vk::Format::eUndefined;
 	}
 	const auto* policy = FindDepthFormatPolicy(depth_format);
-	return policy == nullptr ? VK_FORMAT_UNDEFINED : DepthAttachmentFormat(*policy, has_stencil);
+	return policy == nullptr ? vk::Format::eUndefined : DepthAttachmentFormat(*policy, has_stencil);
 }
 
-[[nodiscard]] inline constexpr VkImageUsageFlags DepthTargetImageUsage() noexcept {
-	return VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-	       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+[[nodiscard]] inline constexpr vk::ImageUsageFlags DepthTargetImageUsage() noexcept {
+	return vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eSampled |
+	       vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
 }
 
-[[nodiscard]] inline constexpr VkFormat DepthAspectTransferFormat(VkFormat format) noexcept {
+[[nodiscard]] inline constexpr vk::Format DepthAspectTransferFormat(vk::Format format) noexcept {
 	switch (format) {
-		case VK_FORMAT_D16_UNORM:
-		case VK_FORMAT_D16_UNORM_S8_UINT: return VK_FORMAT_D16_UNORM;
-		case VK_FORMAT_D24_UNORM_S8_UINT: return VK_FORMAT_X8_D24_UNORM_PACK32;
-		case VK_FORMAT_D32_SFLOAT:
-		case VK_FORMAT_D32_SFLOAT_S8_UINT: return VK_FORMAT_D32_SFLOAT;
-		default: return VK_FORMAT_UNDEFINED;
+		case vk::Format::eD16Unorm:
+		case vk::Format::eD16UnormS8Uint: return vk::Format::eD16Unorm;
+		case vk::Format::eD24UnormS8Uint: return vk::Format::eX8D24UnormPack32;
+		case vk::Format::eD32Sfloat:
+		case vk::Format::eD32SfloatS8Uint: return vk::Format::eD32Sfloat;
+		default: return vk::Format::eUndefined;
 	}
 }
 
-[[nodiscard]] inline constexpr uint32_t DepthAspectTransferBytes(VkFormat format) noexcept {
+[[nodiscard]] inline constexpr uint32_t DepthAspectTransferBytes(vk::Format format) noexcept {
 	switch (DepthAspectTransferFormat(format)) {
-		case VK_FORMAT_D16_UNORM: return 2;
-		case VK_FORMAT_X8_D24_UNORM_PACK32:
-		case VK_FORMAT_D32_SFLOAT: return 4;
+		case vk::Format::eD16Unorm: return 2;
+		case vk::Format::eX8D24UnormPack32:
+		case vk::Format::eD32Sfloat: return 4;
 		default: return 0;
 	}
 }
@@ -197,17 +197,17 @@ FindGuestDepthFormatPolicy(uint32_t guest_format) noexcept {
 	return std::bit_cast<uint32_t>(static_cast<float>(value) / 65535.0f);
 }
 
-[[nodiscard]] inline constexpr bool IsSupportedSampledDepthFormat(VkFormat image_format,
-                                                                  uint32_t guest_format,
-                                                                  VkFormat view_format) noexcept {
+[[nodiscard]] inline constexpr bool IsSupportedSampledDepthFormat(vk::Format image_format,
+                                                                  uint32_t   guest_format,
+                                                                  vk::Format view_format) noexcept {
 	const auto* policy = FindGuestDepthFormatPolicy(guest_format);
 	return policy != nullptr && view_format == policy->sampled_view_format &&
 	       (image_format == policy->depth_attachment_format ||
 	        IsStencilAttachmentFormat(*policy, image_format));
 }
 
-[[nodiscard]] inline constexpr bool IsSupportedSampledDepthFormat(VkFormat image_format,
-                                                                  VkFormat view_format) noexcept {
+[[nodiscard]] inline constexpr bool IsSupportedSampledDepthFormat(vk::Format image_format,
+                                                                  vk::Format view_format) noexcept {
 	for (const auto& policy: DEPTH_FORMAT_POLICIES) {
 		if (IsSupportedSampledDepthFormat(image_format, Prospero::GpuEnumValue(policy.guest_format),
 		                                  view_format)) {
@@ -231,7 +231,7 @@ struct VideoOutInfo {
 	uint64_t            address           = 0;
 	uint64_t            size              = 0;
 	uint64_t            metadata_address  = 0;
-	VkFormat            format            = VK_FORMAT_UNDEFINED;
+	vk::Format          format            = vk::Format::eUndefined;
 	uint32_t            guest_format      = 0;
 	uint32_t            width             = 0;
 	uint32_t            height            = 0;
@@ -272,10 +272,10 @@ CanUseVideoOutNativeWithoutUpload(VideoOutCompression compression, bool render_t
 }
 
 struct VideoOutPixelFormatInfo {
-	VkFormat format            = VK_FORMAT_UNDEFINED;
-	uint32_t guest_format      = 0;
-	uint32_t bytes_per_element = 0;
-	bool     bgra16            = false;
+	vk::Format format            = vk::Format::eUndefined;
+	uint32_t   guest_format      = 0;
+	uint32_t   bytes_per_element = 0;
+	bool       bgra16            = false;
 };
 
 struct VideoOutFormatPolicy {
@@ -285,22 +285,22 @@ struct VideoOutFormatPolicy {
 
 inline constexpr std::array<VideoOutFormatPolicy, 6> VIDEO_OUT_FORMAT_POLICIES {{
     {0x8000000022000000ull,
-     {VK_FORMAT_R8G8B8A8_SRGB, Prospero::GpuEnumValue(Prospero::BufferFormat::k8_8_8_8Srgb), 4,
+     {vk::Format::eR8G8B8A8Srgb, Prospero::GpuEnumValue(Prospero::BufferFormat::k8_8_8_8Srgb), 4,
       false}},
     {0x8000000000000000ull,
-     {VK_FORMAT_B8G8R8A8_SRGB, Prospero::GpuEnumValue(Prospero::BufferFormat::k8_8_8_8Srgb), 4,
+     {vk::Format::eB8G8R8A8Srgb, Prospero::GpuEnumValue(Prospero::BufferFormat::k8_8_8_8Srgb), 4,
       false}},
     {0x8100000022000000ull,
-     {VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+     {vk::Format::eA2B10G10R10UnormPack32,
       Prospero::GpuEnumValue(Prospero::BufferFormat::k10_10_10_2UNorm), 4, false}},
     {0x8100000000000000ull,
-     {VK_FORMAT_A2R10G10B10_UNORM_PACK32,
+     {vk::Format::eA2R10G10B10UnormPack32,
       Prospero::GpuEnumValue(Prospero::BufferFormat::k10_10_10_2UNorm), 4, false}},
     {0xc001000622000000ull,
-     {VK_FORMAT_R16G16B16A16_SFLOAT,
+     {vk::Format::eR16G16B16A16Sfloat,
       Prospero::GpuEnumValue(Prospero::BufferFormat::k16_16_16_16Float), 8, false}},
     {0xc001000600000000ull,
-     {VK_FORMAT_R16G16B16A16_SFLOAT,
+     {vk::Format::eR16G16B16A16Sfloat,
       Prospero::GpuEnumValue(Prospero::BufferFormat::k16_16_16_16Float), 8, true}},
 }};
 
@@ -384,12 +384,12 @@ enum class MetaImageOverlap : uint8_t { RetainSampled, RetireTarget, Unsupported
 }
 
 [[nodiscard]] inline constexpr bool
-IsDepthUintTextureReinterpretation(VkFormat image_format, uint32_t guest_format,
-                                   VkFormat view_format) noexcept {
+IsDepthUintTextureReinterpretation(vk::Format image_format, uint32_t guest_format,
+                                   vk::Format view_format) noexcept {
 	switch (image_format) {
-		case VK_FORMAT_D32_SFLOAT:
+		case vk::Format::eD32Sfloat:
 			return guest_format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32UInt) &&
-			       view_format == VK_FORMAT_R32_UINT;
+			       view_format == vk::Format::eR32Uint;
 		default: return false;
 	}
 }
@@ -479,45 +479,45 @@ SelectDepthTransitionSource(bool depth_load_clear, bool sampled_native_available
 	return encoded <= 0.04045f ? encoded / 12.92f : std::pow((encoded + 0.055f) / 1.055f, 2.4f);
 }
 
-[[nodiscard]] inline bool DecodePackedColorClear(VkFormat format, uint32_t packed,
-                                                 VkClearColorValue* clear) {
+[[nodiscard]] inline bool DecodePackedColorClear(vk::Format format, uint32_t packed,
+                                                 vk::ClearColorValue* clear) {
 	if (clear == nullptr) {
 		return false;
 	}
-	VkClearColorValue next {};
+	vk::ClearColorValue next {};
 	const auto unorm8 = [](uint32_t value) { return static_cast<float>(value & 0xffu) / 255.0f; };
 	switch (format) {
-		case VK_FORMAT_R8G8B8A8_SRGB:
+		case vk::Format::eR8G8B8A8Srgb:
 			next.float32[0] = DecodeSrgbClearComponent(packed);
 			next.float32[1] = DecodeSrgbClearComponent(packed >> 8u);
 			next.float32[2] = DecodeSrgbClearComponent(packed >> 16u);
 			next.float32[3] = unorm8(packed >> 24u);
 			break;
-		case VK_FORMAT_B8G8R8A8_SRGB:
+		case vk::Format::eB8G8R8A8Srgb:
 			next.float32[0] = DecodeSrgbClearComponent(packed >> 16u);
 			next.float32[1] = DecodeSrgbClearComponent(packed >> 8u);
 			next.float32[2] = DecodeSrgbClearComponent(packed);
 			next.float32[3] = unorm8(packed >> 24u);
 			break;
-		case VK_FORMAT_R8G8B8A8_UNORM:
+		case vk::Format::eR8G8B8A8Unorm:
 			next.float32[0] = unorm8(packed);
 			next.float32[1] = unorm8(packed >> 8u);
 			next.float32[2] = unorm8(packed >> 16u);
 			next.float32[3] = unorm8(packed >> 24u);
 			break;
-		case VK_FORMAT_B8G8R8A8_UNORM:
+		case vk::Format::eB8G8R8A8Unorm:
 			next.float32[0] = unorm8(packed >> 16u);
 			next.float32[1] = unorm8(packed >> 8u);
 			next.float32[2] = unorm8(packed);
 			next.float32[3] = unorm8(packed >> 24u);
 			break;
-		case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+		case vk::Format::eA2B10G10R10UnormPack32:
 			next.float32[0] = static_cast<float>(packed & 0x3ffu) / 1023.0f;
 			next.float32[1] = static_cast<float>((packed >> 10u) & 0x3ffu) / 1023.0f;
 			next.float32[2] = static_cast<float>((packed >> 20u) & 0x3ffu) / 1023.0f;
 			next.float32[3] = static_cast<float>((packed >> 30u) & 0x3u) / 3.0f;
 			break;
-		case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+		case vk::Format::eA2R10G10B10UnormPack32:
 			next.float32[0] = static_cast<float>((packed >> 20u) & 0x3ffu) / 1023.0f;
 			next.float32[1] = static_cast<float>((packed >> 10u) & 0x3ffu) / 1023.0f;
 			next.float32[2] = static_cast<float>(packed & 0x3ffu) / 1023.0f;
@@ -541,9 +541,9 @@ SelectDepthTransitionSource(bool depth_load_clear, bool sampled_native_available
 	return true;
 }
 
-[[nodiscard]] inline bool DecodePackedDepthClear(VkFormat format, uint32_t packed, float* clear) {
+[[nodiscard]] inline bool DecodePackedDepthClear(vk::Format format, uint32_t packed, float* clear) {
 	if (clear == nullptr ||
-	    (format != VK_FORMAT_D32_SFLOAT && format != VK_FORMAT_D32_SFLOAT_S8_UINT)) {
+	    (format != vk::Format::eD32Sfloat && format != vk::Format::eD32SfloatS8Uint)) {
 		return false;
 	}
 	const auto value = std::bit_cast<float>(packed);
@@ -557,7 +557,7 @@ SelectDepthTransitionSource(bool depth_load_clear, bool sampled_native_available
 [[nodiscard]] inline bool CanNativeClearDepthFromBuffer(const DepthTargetInfo& target,
                                                         uint64_t address, uint64_t size) {
 	const bool d32 =
-	    target.format == VK_FORMAT_D32_SFLOAT || target.format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+	    target.format == vk::Format::eD32Sfloat || target.format == vk::Format::eD32SfloatS8Uint;
 	return address == target.address && size == target.size && target.layers == 1 && d32 &&
 	       target.guest_format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32Float) &&
 	       target.bytes_per_element == 4 &&
@@ -621,31 +621,32 @@ SelectDepthTransitionSource(bool depth_load_clear, bool sampled_native_available
 	                                            : SampledOverlap::Unsupported;
 }
 
-[[nodiscard]] inline bool IsRgba8SrgbReinterpretation(VkFormat cached, VkFormat requested) noexcept;
+[[nodiscard]] inline bool IsRgba8SrgbReinterpretation(vk::Format cached,
+                                                      vk::Format requested) noexcept;
 
-[[nodiscard]] inline bool IsR32UintFloatReinterpretation(VkFormat cached,
-                                                         VkFormat requested) noexcept {
+[[nodiscard]] inline bool IsR32UintFloatReinterpretation(vk::Format cached,
+                                                         vk::Format requested) noexcept {
 	switch (cached) {
-		case VK_FORMAT_R32_UINT: return requested == VK_FORMAT_R32_SFLOAT;
-		case VK_FORMAT_R32_SFLOAT: return requested == VK_FORMAT_R32_UINT;
+		case vk::Format::eR32Uint: return requested == vk::Format::eR32Sfloat;
+		case vk::Format::eR32Sfloat: return requested == vk::Format::eR32Uint;
 		default: return false;
 	}
 }
 
-[[nodiscard]] inline bool IsRgba16UintFloatReinterpretation(VkFormat cached,
-                                                            VkFormat requested) noexcept {
+[[nodiscard]] inline bool IsRgba16UintFloatReinterpretation(vk::Format cached,
+                                                            vk::Format requested) noexcept {
 	switch (cached) {
-		case VK_FORMAT_R16G16B16A16_SFLOAT: return requested == VK_FORMAT_R16G16B16A16_UINT;
-		case VK_FORMAT_R16G16B16A16_UINT: return requested == VK_FORMAT_R16G16B16A16_SFLOAT;
+		case vk::Format::eR16G16B16A16Sfloat: return requested == vk::Format::eR16G16B16A16Uint;
+		case vk::Format::eR16G16B16A16Uint: return requested == vk::Format::eR16G16B16A16Sfloat;
 		default: return false;
 	}
 }
 
-[[nodiscard]] inline bool IsRgba8UnormUintReinterpretation(VkFormat cached,
-                                                           VkFormat requested) noexcept {
+[[nodiscard]] inline bool IsRgba8UnormUintReinterpretation(vk::Format cached,
+                                                           vk::Format requested) noexcept {
 	switch (cached) {
-		case VK_FORMAT_R8G8B8A8_UNORM: return requested == VK_FORMAT_R8G8B8A8_UINT;
-		case VK_FORMAT_R8G8B8A8_UINT: return requested == VK_FORMAT_R8G8B8A8_UNORM;
+		case vk::Format::eR8G8B8A8Unorm: return requested == vk::Format::eR8G8B8A8Uint;
+		case vk::Format::eR8G8B8A8Uint: return requested == vk::Format::eR8G8B8A8Unorm;
 		default: return false;
 	}
 }
@@ -658,7 +659,7 @@ SelectDepthTransitionSource(bool depth_load_clear, bool sampled_native_available
 	    sampled.size == target.size * sampled.depth && sampled.width == target.width &&
 	    sampled.height == target.height && sampled.pitch == target.pitch;
 	return sampled.address == target.address && sampled.size > target.size &&
-	       sampled.format == target.guest_format && target.format == VK_FORMAT_D32_SFLOAT &&
+	       sampled.format == target.guest_format && target.format == vk::Format::eD32Sfloat &&
 	       target.guest_format == Prospero::GpuEnumValue(Prospero::BufferFormat::k32Float) &&
 	       target.bytes_per_element == 4 && target.stencil_address == 0 &&
 	       target.stencil_size == 0 && target.htile_address == 0 && target.htile_size == 0 &&
@@ -669,7 +670,7 @@ SelectDepthTransitionSource(bool depth_load_clear, bool sampled_native_available
 
 [[nodiscard]] inline StorageSampledOverlap
 ClassifyStorageSampledOverlap(const ImageInfo& requested, const ImageInfo& cached,
-                              VkFormat requested_view_format, VkFormat cached_image_format,
+                              vk::Format requested_view_format, vk::Format cached_image_format,
                               bool cached_gpu_modified, bool cached_cpu_dirty, bool same_context) {
 	if (!ImagePageRangesOverlap(requested.address, requested.size, cached.address, cached.size)) {
 		return StorageSampledOverlap::None;
@@ -854,7 +855,7 @@ ClassifyRenderTargetOverlap(const ImageInfo& sampled, bool sampled_gpu_modified,
 }
 
 [[nodiscard]] inline RenderTargetOverlap
-ClassifyStorageRenderTargetOverlap(const ImageInfo& storage, VkFormat storage_format,
+ClassifyStorageRenderTargetOverlap(const ImageInfo& storage, vk::Format storage_format,
                                    bool storage_gpu_modified, bool storage_buffer_modified,
                                    bool storage_cpu_dirty, bool same_context,
                                    const RenderTargetInfo& target) {
@@ -875,18 +876,18 @@ ClassifyStorageRenderTargetOverlap(const ImageInfo& storage, VkFormat storage_fo
 	           : RenderTargetOverlap::Unsupported;
 }
 
-[[nodiscard]] inline bool IsRgba8SrgbViewFormat(VkFormat format) noexcept {
-	return format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB ||
-	       format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB;
+[[nodiscard]] inline bool IsRgba8SrgbViewFormat(vk::Format format) noexcept {
+	return format == vk::Format::eR8G8B8A8Unorm || format == vk::Format::eR8G8B8A8Srgb ||
+	       format == vk::Format::eB8G8R8A8Unorm || format == vk::Format::eB8G8R8A8Srgb;
 }
 
-[[nodiscard]] inline bool IsRgba8SrgbReinterpretation(VkFormat cached,
-                                                      VkFormat requested) noexcept {
+[[nodiscard]] inline bool IsRgba8SrgbReinterpretation(vk::Format cached,
+                                                      vk::Format requested) noexcept {
 	switch (cached) {
-		case VK_FORMAT_R8G8B8A8_UNORM: return requested == VK_FORMAT_R8G8B8A8_SRGB;
-		case VK_FORMAT_R8G8B8A8_SRGB: return requested == VK_FORMAT_R8G8B8A8_UNORM;
-		case VK_FORMAT_B8G8R8A8_UNORM: return requested == VK_FORMAT_B8G8R8A8_SRGB;
-		case VK_FORMAT_B8G8R8A8_SRGB: return requested == VK_FORMAT_B8G8R8A8_UNORM;
+		case vk::Format::eR8G8B8A8Unorm: return requested == vk::Format::eR8G8B8A8Srgb;
+		case vk::Format::eR8G8B8A8Srgb: return requested == vk::Format::eR8G8B8A8Unorm;
+		case vk::Format::eB8G8R8A8Unorm: return requested == vk::Format::eB8G8R8A8Srgb;
+		case vk::Format::eB8G8R8A8Srgb: return requested == vk::Format::eB8G8R8A8Unorm;
 		default: return false;
 	}
 }

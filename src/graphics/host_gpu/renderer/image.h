@@ -15,7 +15,7 @@ struct GpuTextureVulkanImage;
 struct GraphicContext;
 struct RenderTextureVulkanImage;
 struct VideoOutVulkanImage;
-struct VulkanMemory;
+struct VulkanImage;
 
 struct Image final: ImageInfo {
 	Image& operator=(const ImageInfo& value) {
@@ -101,37 +101,31 @@ private:
 namespace ImageOps {
 
 [[nodiscard]] GpuTextureVulkanImage* CreateTexture(GraphicContext* ctx, const ImageInfo& info,
-                                                   bool storage, VulkanMemory* memory,
-                                                   VkComponentMapping* components);
+                                                   bool storage, vk::ComponentMapping* components);
 void CreateTextureViews(GraphicContext* ctx, GpuTextureVulkanImage* image, const ImageInfo& info,
-                        bool storage, VkComponentMapping components);
+                        bool storage, vk::ComponentMapping components);
 
-[[nodiscard]] RenderTextureVulkanImage*
-CreateRenderTarget(GraphicContext* ctx, const RenderTargetInfo& info, VulkanMemory* memory);
-[[nodiscard]] uint32_t RenderTargetTransferFormat(uint32_t bytes_per_element);
+[[nodiscard]] RenderTextureVulkanImage* CreateRenderTarget(GraphicContext*         ctx,
+                                                           const RenderTargetInfo& info);
+[[nodiscard]] uint32_t                  RenderTargetTransferFormat(uint32_t bytes_per_element);
 void UploadRenderTargetLayers(GraphicContext* ctx, RenderTextureVulkanImage* image,
                               const RenderTargetInfo& info, uint32_t base_layer,
                               uint32_t layer_count, bool refresh);
 void UploadRenderTarget(GraphicContext* ctx, RenderTextureVulkanImage* image,
                         const RenderTargetInfo& info, bool refresh);
 
-[[nodiscard]] DepthStencilVulkanImage*
-CreateDepthTarget(GraphicContext* ctx, const DepthTargetInfo& info, VulkanMemory* memory);
+[[nodiscard]] DepthStencilVulkanImage* CreateDepthTarget(GraphicContext*        ctx,
+                                                         const DepthTargetInfo& info);
 
 void                               ValidateVideoOut(GraphicContext* ctx, const VideoOutInfo& info);
-[[nodiscard]] VideoOutVulkanImage* CreateVideoOut(GraphicContext* ctx, const VideoOutInfo& info,
-                                                  VulkanMemory* memory);
+[[nodiscard]] VideoOutVulkanImage* CreateVideoOut(GraphicContext* ctx, const VideoOutInfo& info);
 void UploadVideoOut(GraphicContext* ctx, VideoOutVulkanImage* image, const VideoOutInfo& info,
                     bool refresh);
 
 [[nodiscard]] GpuTextureVulkanImage* CreateDummyTexture(GraphicContext* ctx, bool uint_format,
-                                                        bool image_3d, bool storage,
-                                                        VulkanMemory* memory);
+                                                        bool image_3d, bool storage);
 
-void Destroy(GraphicContext* ctx, GpuTextureVulkanImage* image, VulkanMemory* memory);
-void Destroy(GraphicContext* ctx, RenderTextureVulkanImage* image, VulkanMemory* memory);
-void Destroy(GraphicContext* ctx, DepthStencilVulkanImage* image, VulkanMemory* memory);
-void Destroy(GraphicContext* ctx, VideoOutVulkanImage* image, VulkanMemory* memory);
+void Destroy(GraphicContext* ctx, VulkanImage* image);
 
 } // namespace ImageOps
 

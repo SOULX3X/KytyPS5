@@ -224,20 +224,6 @@ constexpr uint32_t GetFormatComponentCount(Prospero::BufferFormat format) {
 	return GetFormatInfo(format).component_count;
 }
 
-constexpr uint32_t GetFormatByteSize(Prospero::BufferFormat format) {
-	return GetFormatInfo(format).byte_size;
-}
-
-constexpr uint32_t GetFormatComponentBits(Prospero::BufferFormat format, uint32_t component) {
-	const auto info = GetFormatInfo(format);
-	return component < info.component_count ? info.component_bits[component] : 0u;
-}
-
-constexpr uint32_t GetFormatComponentBitOffset(Prospero::BufferFormat format, uint32_t component) {
-	const auto info = GetFormatInfo(format);
-	return component < info.component_count ? info.component_bit_offset[component] : 0u;
-}
-
 constexpr uint32_t GetFormatComponentByteOffset(Prospero::BufferFormat format, uint32_t component) {
 	const auto info = GetFormatInfo(format);
 	if (component >= info.component_count) {

@@ -23,8 +23,9 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/renderTargetBarriers.h"
 #include "graphics/host_gpu/renderer/shaderResourceBarrier.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vma.h"
+#include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/displayBuffer.h"
 #include "graphics/shader/recompiler/BindingLayout.h"
 #include "graphics/shader/recompiler/ResourceMaterialization.h"
@@ -33,10 +34,9 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstring>
 #include <fmt/format.h>
 #include <limits>
-#include <vulkan/vk_enum_string_helper.h>
+#include <span>
 
 #ifdef min
 #undef min
@@ -69,14 +69,6 @@ static const char* VulkanImageTypeName(VulkanImageType type) {
 		case VulkanImageType::Unknown:
 		default: return "Unknown";
 	}
-}
-
-VkImageAspectFlags DepthStencilAspectMask(VkFormat format) {
-	auto ret = static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_DEPTH_BIT);
-	if (format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
-		ret |= VK_IMAGE_ASPECT_STENCIL_BIT;
-	}
-	return ret;
 }
 
 static int SampledArrayViewIndex(const VulkanImage* image, int view_index) {
@@ -126,25 +118,10 @@ static VulkanImage* GetDummyStorageTexture(TextureVariant variant) {
 	                                                               TextureVariantIs3D(variant));
 }
 
-static ShaderBufferResource
-NativeBufferDescriptor(const ShaderRecompiler::IR::DescriptorValue& descriptor) {
-	ShaderBufferResource result;
-	std::copy_n(descriptor.dwords.begin(), std::size(result.fields), result.fields);
-	return result;
-}
-
-static ShaderTextureResource
-NativeTextureDescriptor(const ShaderRecompiler::IR::DescriptorValue& descriptor) {
-	ShaderTextureResource result;
-	std::copy_n(descriptor.dwords.begin(), std::size(result.fields), result.fields);
-	return result;
-}
-
-static ShaderSamplerResource
-NativeSamplerDescriptor(const ShaderRecompiler::IR::DescriptorValue& descriptor) {
-	ShaderSamplerResource result;
-	std::copy_n(descriptor.dwords.begin(), std::size(result.fields), result.fields);
-	return result;
+static void CopyNativeDescriptor(const ShaderRecompiler::IR::DescriptorValue& source,
+                                 std::span<uint32_t>                          destination) {
+	EXIT_IF(source.dword_count != destination.size());
+	std::copy_n(source.dwords.begin(), destination.size(), destination.begin());
 }
 
 static BufferView NativeStorageBuffer(uint64_t submit_id, CommandBuffer* command_buffer,
@@ -229,7 +206,7 @@ static BufferView NativeStorageBuffer(uint64_t submit_id, CommandBuffer* command
 	}
 	result.buffer = binding.first;
 	result.offset = binding.second;
-	result.range  = static_cast<VkDeviceSize>(size);
+	result.range  = static_cast<vk::DeviceSize>(size);
 	return result;
 }
 
@@ -267,7 +244,7 @@ NativeAddressBuffer(uint64_t submit_id, CommandBuffer* command_buffer,
 	                                                             address.binding_base, size);
 	result.buffer = binding.first;
 	result.offset = binding.second;
-	result.range  = static_cast<VkDeviceSize>(size);
+	result.range  = static_cast<vk::DeviceSize>(size);
 	return result;
 }
 
@@ -306,16 +283,16 @@ TargetTextureViewInfo ResolveTargetTextureView(const ShaderRecompiler::IR::Image
 		case Prospero::ImageType::kColor2D:
 			return resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2D &&
 			               base_layer == 0 && image_layers == 1
-			           ? TargetTextureViewInfo {VK_IMAGE_VIEW_TYPE_2D, 0, 1}
+			           ? TargetTextureViewInfo {vk::ImageViewType::e2D, 0, 1}
 			           : TargetTextureViewInfo {};
 		case Prospero::ImageType::kColor2DArray:
 			if (resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2D &&
 			    base_layer == 0 && image_layers == 1) {
-				return {VK_IMAGE_VIEW_TYPE_2D, 0, 1};
+				return {vk::ImageViewType::e2D, 0, 1};
 			}
 			return resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2DArray &&
 			               base_layer < image_layers
-			           ? TargetTextureViewInfo {VK_IMAGE_VIEW_TYPE_2D_ARRAY, base_layer,
+			           ? TargetTextureViewInfo {vk::ImageViewType::e2DArray, base_layer,
 			                                    image_layers - base_layer}
 			           : TargetTextureViewInfo {};
 		default: return {};
@@ -365,7 +342,7 @@ static bool IsSupportedDepthTextureEncoding(const ShaderTextureResource& descrip
 
 static void ValidateDepthTargetBinding(const ShaderRecompiler::IR::ImageResource& resource,
                                        const ShaderTextureResource&               descriptor,
-                                       const VulkanImage* image, VkFormat view_format,
+                                       const VulkanImage* image, vk::Format view_format,
                                        uint64_t size) {
 	const bool resource_ok = IsSupportedSampledDepthResource(resource);
 	const bool descriptor_ok =
@@ -389,7 +366,8 @@ static void ValidateDepthTargetBinding(const ShaderRecompiler::IR::ImageResource
 	     static_cast<uint32_t>(resource.dimension), static_cast<uint32_t>(resource.mip_mode),
 	     resource.read, resource.written, resource.atomic, resource.depth_compare,
 	     descriptor.Format(), descriptor.DstSelXYZW(),
-	     image == nullptr ? static_cast<int>(VK_FORMAT_UNDEFINED) : static_cast<int>(image->format),
+	     image == nullptr ? static_cast<int>(vk::Format::eUndefined)
+	                      : static_cast<int>(image->format),
 	     static_cast<int>(view_format), image == nullptr ? 0u : image->layers, descriptor.Type(),
 	     descriptor.BaseArray5(), descriptor.Depth(), descriptor_pitch,
 	     image == nullptr ? 0u : image->guest_pitch, descriptor.Base40(), size,
@@ -504,10 +482,11 @@ static DescriptorCache::TextureBinding
 NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
               const ShaderRecompiler::IR::ImageResource&   resource,
               const ShaderRecompiler::IR::DescriptorValue& value) {
-	auto       descriptor = NativeTextureDescriptor(value);
-	const bool storage    = resource.kind == ShaderRecompiler::IR::ResourceKind::StorageImage ||
-	                        resource.kind == ShaderRecompiler::IR::ResourceKind::StorageImageUint;
-	const auto variant    = NativeTextureVariant(resource);
+	ShaderTextureResource descriptor;
+	CopyNativeDescriptor(value, descriptor.fields);
+	const bool storage = resource.kind == ShaderRecompiler::IR::ResourceKind::StorageImage ||
+	                     resource.kind == ShaderRecompiler::IR::ResourceKind::StorageImageUint;
+	const auto variant = NativeTextureVariant(resource);
 	if (storage) {
 		ValidateStorageImageResource(resource);
 	}
@@ -541,8 +520,7 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 		EXIT("sampled image numeric class mismatch: kind=%u format=%u addr=0x%016" PRIx64 "\n",
 		     static_cast<uint32_t>(resource.kind), format, address);
 	}
-	const auto view_format = TextureGetFormat(format, storage ? TextureFormatUsage::Storage
-	                                                          : TextureFormatUsage::Sampled);
+	const auto view_format = TextureGetFormat(format);
 	const auto type        = static_cast<Prospero::ImageType>(descriptor.Type());
 	const auto target_view =
 	    ResolveTargetTextureView(resource, type, descriptor.BaseArray5(), depth);
@@ -559,11 +537,11 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 		                                                  resource.written);
 	}
 
-	VulkanImage* image      = nullptr;
-	int          view       = VulkanImage::VIEW_DEFAULT;
-	VkImageView  image_view = nullptr;
-	const bool check_depth  = static_cast<Prospero::TileMode>(tile) == Prospero::TileMode::kDepth ||
-	                          descriptor.MsaaDepth();
+	VulkanImage*  image      = nullptr;
+	int           view       = VulkanImage::VIEW_DEFAULT;
+	vk::ImageView image_view = nullptr;
+	const bool check_depth = static_cast<Prospero::TileMode>(tile) == Prospero::TileMode::kDepth ||
+	                         descriptor.MsaaDepth();
 	if (image == nullptr) {
 		if (check_depth) {
 			image = g_render_ctx->GetTextureCache()->FindDepthTargetByRange(command_buffer, address,
@@ -592,7 +570,8 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 					const auto depth_view = ResolveTargetTextureView(
 					    resource, type, descriptor.BaseArray5(), image->layers);
 					ValidateDepthTargetBinding(resource, descriptor, image, view_format, size.size);
-					if (depth_view.type == VK_IMAGE_VIEW_TYPE_MAX_ENUM) {
+					if (depth_view.type ==
+					    static_cast<vk::ImageViewType>(VK_IMAGE_VIEW_TYPE_MAX_ENUM)) {
 						EXIT("unsupported sampled depth target view: dimension=%u "
 						     "descriptor_type=%u "
 						     "base_array=%u image_layers=%u\n",
@@ -611,7 +590,8 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 				    height != image->extent.height ||
 				    (storage ? levels != image->mip_levels || base_level != 0
 				             : levels != image->mip_levels || base_level >= levels) ||
-				    target_view.type == VK_IMAGE_VIEW_TYPE_MAX_ENUM ||
+				    target_view.type ==
+				        static_cast<vk::ImageViewType>(VK_IMAGE_VIEW_TYPE_MAX_ENUM) ||
 				    target_view.base_layer >= image->layers ||
 				    target_view.layer_count > image->layers - target_view.base_layer) {
 					EXIT("unsupported cached render-target image view: storage=%d resource=%u "
@@ -656,13 +636,13 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 				    resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2D &&
 				    !resource.read && resource.written && !resource.atomic &&
 				    format == Prospero::GpuEnumValue(Prospero::BufferFormat::k8_8_8_8UInt) &&
-				    view_format == VK_FORMAT_R8G8B8A8_UINT && swizzle == DstSel(6, 5, 4, 7) &&
+				    view_format == vk::Format::eR8G8B8A8Uint && swizzle == DstSel(6, 5, 4, 7) &&
 				    width == video.image->extent.width && height == video.image->extent.height &&
 				    depth == 1 && levels == 1 && base_level == 0 && view_levels == 1 &&
 				    type == Prospero::ImageType::kColor2D && video.size == size.size &&
 				    video.pitch == pitch &&
-				    (video.image->format == VK_FORMAT_R8G8B8A8_SRGB ||
-				     video.image->format == VK_FORMAT_B8G8R8A8_SRGB) &&
+				    (video.image->format == vk::Format::eR8G8B8A8Srgb ||
+				     video.image->format == vk::Format::eB8G8R8A8Srgb) &&
 				    video.image->image_view[VulkanImage::VIEW_STORAGE] != nullptr;
 				if (!exact) {
 					EXIT("unsupported storage access to video-out surface: format=%u view=%d"
@@ -693,7 +673,7 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 				image      = video.image;
 				image_view = g_render_ctx->GetTextureCache()->GetSampledColorView(
 				    g_render_ctx->GetGraphicCtx(), video.image, view_format, swizzle, 0, 1,
-				    VK_IMAGE_VIEW_TYPE_2D, 0, 1);
+				    vk::ImageViewType::e2D, 0, 1);
 			}
 		}
 	}
@@ -749,9 +729,10 @@ NativeTexture(uint64_t submit_id, CommandBuffer* command_buffer,
 	return {image, view, image_view};
 }
 
-static VkSampler NativeSampler(const ShaderRecompiler::IR::Program& program, uint32_t index,
-                               const ShaderRecompiler::IR::DescriptorValue& value) {
-	auto       descriptor    = NativeSamplerDescriptor(value);
+static vk::Sampler NativeSampler(const ShaderRecompiler::IR::Program& program, uint32_t index,
+                                 const ShaderRecompiler::IR::DescriptorValue& value) {
+	ShaderSamplerResource descriptor;
+	CopyNativeDescriptor(value, descriptor.fields);
 	const bool depth_compare = std::any_of(program.info.sampled_pairs.begin(),
 	                                       program.info.sampled_pairs.end(), [&](const auto& pair) {
 		                                       return pair.sampler == index &&
@@ -773,10 +754,10 @@ static BufferView NativeUpload(CommandBuffer* command_buffer, std::span<const ui
 	return result;
 }
 
-std::vector<ShaderAddressWriteRange>
-BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point,
-                VkPipelineLayout layout, const ShaderStageRuntime& runtime,
-                VkShaderStageFlags vk_stage, DescriptorCache::Stage stage) {
+void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer,
+                     vk::PipelineBindPoint pipeline_bind_point, vk::PipelineLayout layout,
+                     const ShaderStageRuntime& runtime, vk::ShaderStageFlags vk_stage,
+                     DescriptorCache::Stage stage) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(buffer == nullptr || !runtime);
 	const auto& program  = *runtime.program;
@@ -785,22 +766,23 @@ BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint p
 	if (!ShaderRecompiler::IR::ValidateResourceSpecialization(program, snapshot, &error)) {
 		EXIT("invalid native shader runtime snapshot: %s\n", error.c_str());
 	}
-	auto*      vk_buffer     = buffer->GetPool()->buffers[buffer->GetIndex()];
+	auto       vk_buffer     = buffer->Handle();
 	const auto shader_stages = ShaderPipelineStages(vk_stage);
 
 	DescriptorCache::NativeDescriptors descriptors;
 	descriptors.buffers.reserve(program.info.buffers.size());
 	for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
+		ShaderBufferResource descriptor;
+		CopyNativeDescriptor(snapshot.buffers[i], descriptor.fields);
 		descriptors.buffers.push_back(
-		    NativeStorageBuffer(submit_id, buffer, NativeBufferDescriptor(snapshot.buffers[i]),
-		                        program.info.buffers[i]));
+		    NativeStorageBuffer(submit_id, buffer, descriptor, program.info.buffers[i]));
 	}
 	descriptors.images.reserve(program.info.images.size());
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		const auto kind = program.info.images[i].kind;
 		if ((kind == ShaderRecompiler::IR::ResourceKind::StorageImage ||
 		     kind == ShaderRecompiler::IR::ResourceKind::StorageImageUint) &&
-		    vk_stage != VK_SHADER_STAGE_COMPUTE_BIT) {
+		    vk_stage != vk::ShaderStageFlagBits::eCompute) {
 			EXIT("storage images are unsupported outside compute shaders\n");
 		}
 		descriptors.images.push_back(
@@ -811,17 +793,9 @@ BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint p
 		descriptors.samplers.push_back(NativeSampler(program, i, snapshot.samplers[i]));
 	}
 	descriptors.addresses.reserve(program.info.addresses.size());
-	std::vector<ShaderAddressWriteRange> address_writes;
 	for (uint32_t i = 0; i < program.info.addresses.size(); i++) {
-		auto view = NativeAddressBuffer(submit_id, buffer, program.info.addresses[i],
-		                                snapshot.addresses[i]);
-		descriptors.addresses.push_back(view);
-		if (program.info.addresses[i].written && snapshot.addresses[i].binding_base != 0) {
-			EXIT_IF(view.buffer == nullptr || view.offset != 0 || view.range == VK_WHOLE_SIZE ||
-			        view.range == 0);
-			address_writes.push_back({view.buffer, snapshot.addresses[i].binding_base,
-			                          static_cast<uint64_t>(view.range)});
-		}
+		descriptors.addresses.push_back(NativeAddressBuffer(
+		    submit_id, buffer, program.info.addresses[i], snapshot.addresses[i]));
 	}
 	if (ShaderRecompiler::IR::FindBinding(
 	        program.bindings, ShaderRecompiler::IR::DescriptorBindingKind::FlattenedSrt) !=
@@ -843,11 +817,10 @@ BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint p
 		descriptors.gds.buffer =
 		    g_render_ctx->GetGdsBuffer()->GetBuffer(g_render_ctx->GetGraphicCtx());
 		const auto barrier = MakeGdsDependency(*descriptors.gds.buffer);
-		vkCmdPipelineBarrier(vk_buffer,
-		                     VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
-		                         VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT |
-		                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		                     shader_stages, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+		vk_buffer.pipelineBarrier(
+		    vk::PipelineStageFlagBits::eHost | vk::PipelineStageFlagBits::eTransfer |
+		        vk::PipelineStageFlagBits::eAllGraphics | vk::PipelineStageFlagBits::eComputeShader,
+		    shader_stages, vk::DependencyFlags {}, 0, nullptr, 1, &barrier, 0, nullptr);
 	}
 
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
@@ -871,25 +844,24 @@ BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint p
 		} else {
 			const auto barrier =
 			    MakeStorageImageDependency(*image, resource.read, resource.written);
-			vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, shader_stages, 0, 0,
-			                     nullptr, 0, nullptr, 1, &barrier);
-			image->layout = VK_IMAGE_LAYOUT_GENERAL;
+			vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, shader_stages,
+			                          vk::DependencyFlags {}, 0, nullptr, 0, nullptr, 1, &barrier);
+			image->layout = vk::ImageLayout::eGeneral;
 		}
 	}
 
 	if (!program.bindings.descriptors.empty()) {
 		auto* set = g_render_ctx->GetDescriptorCache()->GetDescriptor(stage, program, descriptors);
 		EXIT_IF(set == nullptr);
-		vkCmdBindDescriptorSets(vk_buffer, pipeline_bind_point, layout,
-		                        program.bindings.descriptor_set, 1, &set->set, 0, nullptr);
+		vk_buffer.bindDescriptorSets(pipeline_bind_point, layout, program.bindings.descriptor_set,
+		                             1, &set->set, 0, nullptr);
 		buffer->RecycleDescriptorAfterFence(set);
 	}
 	if (program.bindings.push_constant_size != 0) {
 		EXIT_IF(program.bindings.push_constant_size != user_data.size() * sizeof(uint32_t));
-		vkCmdPushConstants(vk_buffer, layout, vk_stage, program.bindings.push_constant_offset,
-		                   program.bindings.push_constant_size, user_data.data());
+		vk_buffer.pushConstants(layout, vk_stage, program.bindings.push_constant_offset,
+		                        program.bindings.push_constant_size, user_data.data());
 	}
-	return address_writes;
 }
 
 } // namespace Libs::Graphics

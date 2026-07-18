@@ -40,47 +40,48 @@ namespace Libs::Graphics {
 	        height != 0 && depth == 1);
 }
 
-[[noreturn]] inline void UnsupportedColorView(const char* usage, VkFormat image_format,
-                                              VkFormat view_format, uint32_t swizzle) noexcept {
+[[noreturn]] inline void UnsupportedColorView(const char* usage, vk::Format image_format,
+                                              vk::Format view_format, uint32_t swizzle) noexcept {
 	EXIT("unsupported %s color image view: image_format=%d view_format=%d swizzle=0x%03x\n", usage,
 	     static_cast<int>(image_format), static_cast<int>(view_format), swizzle);
 }
 
-[[nodiscard]] inline VkFormat BgraToRgbaSampledViewFormat(VkFormat image_format) noexcept {
+[[nodiscard]] inline vk::Format BgraToRgbaSampledViewFormat(vk::Format image_format) noexcept {
 	switch (image_format) {
-		case VK_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
-		case VK_FORMAT_B8G8R8A8_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
-		case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
-		default: return VK_FORMAT_UNDEFINED;
+		case vk::Format::eB8G8R8A8Unorm: return vk::Format::eR8G8B8A8Unorm;
+		case vk::Format::eB8G8R8A8Srgb: return vk::Format::eR8G8B8A8Srgb;
+		case vk::Format::eA2R10G10B10UnormPack32: return vk::Format::eA2B10G10R10UnormPack32;
+		default: return vk::Format::eUndefined;
 	}
 }
 
-[[nodiscard]] inline bool IsBgraToRgbaSampledView(VkFormat image_format,
-                                                  VkFormat view_format) noexcept {
+[[nodiscard]] inline bool IsBgraToRgbaSampledView(vk::Format image_format,
+                                                  vk::Format view_format) noexcept {
 	switch (image_format) {
-		case VK_FORMAT_B8G8R8A8_UNORM:
-		case VK_FORMAT_B8G8R8A8_SRGB:
+		case vk::Format::eB8G8R8A8Unorm:
+		case vk::Format::eB8G8R8A8Srgb:
 			switch (view_format) {
-				case VK_FORMAT_R8G8B8A8_UNORM:
-				case VK_FORMAT_R8G8B8A8_SRGB: return true;
+				case vk::Format::eR8G8B8A8Unorm:
+				case vk::Format::eR8G8B8A8Srgb: return true;
 				default: return false;
 			}
-		case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
-			return view_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+		case vk::Format::eA2R10G10B10UnormPack32:
+			return view_format == vk::Format::eA2B10G10R10UnormPack32;
 		default: return false;
 	}
 }
 
-[[nodiscard]] inline VkFormat BgraSrgbStorageViewFormat(VkFormat image_format) noexcept {
-	return image_format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_UNDEFINED;
+[[nodiscard]] inline vk::Format BgraSrgbStorageViewFormat(vk::Format image_format) noexcept {
+	return image_format == vk::Format::eB8G8R8A8Srgb ? vk::Format::eR8G8B8A8Unorm
+	                                                 : vk::Format::eUndefined;
 }
 
-[[nodiscard]] inline VkFormat SrgbStorageViewFormat(VkFormat image_format) noexcept {
-	return image_format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM
-	                                               : BgraSrgbStorageViewFormat(image_format);
+[[nodiscard]] inline vk::Format SrgbStorageViewFormat(vk::Format image_format) noexcept {
+	return image_format == vk::Format::eR8G8B8A8Srgb ? vk::Format::eR8G8B8A8Unorm
+	                                                 : BgraSrgbStorageViewFormat(image_format);
 }
 
-[[nodiscard]] inline bool IsBgraSrgbStorageView(VkFormat image_format, VkFormat view_format,
+[[nodiscard]] inline bool IsBgraSrgbStorageView(vk::Format image_format, vk::Format view_format,
                                                 uint32_t swizzle) noexcept {
 	return view_format == BgraSrgbStorageViewFormat(image_format) && swizzle == DstSel(6, 5, 4, 7);
 }
@@ -103,8 +104,9 @@ namespace Libs::Graphics {
 	return true;
 }
 
-[[nodiscard]] inline bool IsSupportedSampledColorView(VkFormat image_format, VkFormat view_format,
-                                                      uint32_t swizzle) noexcept {
+[[nodiscard]] inline bool IsSupportedSampledColorView(vk::Format image_format,
+                                                      vk::Format view_format,
+                                                      uint32_t   swizzle) noexcept {
 	if (!IsValidSampledColorSwizzle(swizzle)) {
 		return false;
 	}
@@ -119,16 +121,17 @@ namespace Libs::Graphics {
 	return IsBgraToRgbaSampledView(image_format, view_format) && swizzle == DstSel(6, 5, 4, 7);
 }
 
-[[nodiscard]] inline uint32_t SelectSampledColorView(VkFormat image_format, VkFormat view_format,
-                                                     uint32_t swizzle) noexcept {
+[[nodiscard]] inline uint32_t
+SelectSampledColorView(vk::Format image_format, vk::Format view_format, uint32_t swizzle) noexcept {
 	if (IsSupportedSampledColorView(image_format, view_format, swizzle)) {
 		return swizzle;
 	}
 	UnsupportedColorView("sampled", image_format, view_format, swizzle);
 }
 
-[[nodiscard]] inline bool IsSupportedSampledDepthView(VkFormat image_format, VkFormat view_format,
-                                                      uint32_t swizzle) noexcept {
+[[nodiscard]] inline bool IsSupportedSampledDepthView(vk::Format image_format,
+                                                      vk::Format view_format,
+                                                      uint32_t   swizzle) noexcept {
 	if (!IsSupportedSampledDepthFormat(image_format, view_format)) {
 		return false;
 	}
@@ -140,8 +143,8 @@ namespace Libs::Graphics {
 	}
 }
 
-[[nodiscard]] inline uint32_t SelectSampledDepthView(VkFormat image_format, VkFormat view_format,
-                                                     uint32_t swizzle) noexcept {
+[[nodiscard]] inline uint32_t
+SelectSampledDepthView(vk::Format image_format, vk::Format view_format, uint32_t swizzle) noexcept {
 	if (IsSupportedSampledDepthView(image_format, view_format, swizzle)) {
 		return swizzle;
 	}
@@ -166,20 +169,20 @@ IsSupportedSampledDepthUintResource(const ShaderRecompiler::IR::ImageResource& r
 	       !resource.written && !resource.atomic && !resource.depth_compare;
 }
 
-[[nodiscard]] inline int SelectStorageColorView(VkFormat image_format, VkFormat view_format,
+[[nodiscard]] inline int SelectStorageColorView(vk::Format image_format, vk::Format view_format,
                                                 uint32_t swizzle) noexcept {
 	const bool single_channel =
-	    view_format == VK_FORMAT_R8_UNORM || view_format == VK_FORMAT_R8_UINT ||
-	    view_format == VK_FORMAT_R16_UINT || view_format == VK_FORMAT_R32_UINT ||
-	    view_format == VK_FORMAT_R16_SFLOAT || view_format == VK_FORMAT_R32_SFLOAT;
+	    view_format == vk::Format::eR8Unorm || view_format == vk::Format::eR8Uint ||
+	    view_format == vk::Format::eR16Uint || view_format == vk::Format::eR32Uint ||
+	    view_format == vk::Format::eR16Sfloat || view_format == vk::Format::eR32Sfloat;
 	const bool swizzle_ok =
 	    swizzle == DstSel(4, 5, 6, 7) ||
 	    (single_channel && (swizzle == DstSel(4, 0, 0, 0) || swizzle == DstSel(4, 0, 0, 1) ||
 	                        swizzle == DstSel(4, 4, 4, 4))) ||
-	    (view_format == VK_FORMAT_R32G32_UINT && swizzle == DstSel(4, 5, 0, 1)) ||
-	    ((view_format == VK_FORMAT_R8G8B8A8_UNORM || view_format == VK_FORMAT_R8G8B8A8_UINT) &&
+	    (view_format == vk::Format::eR32G32Uint && swizzle == DstSel(4, 5, 0, 1)) ||
+	    ((view_format == vk::Format::eR8G8B8A8Unorm || view_format == vk::Format::eR8G8B8A8Uint) &&
 	     (swizzle == DstSel(4, 5, 6, 1) || swizzle == DstSel(6, 5, 4, 7))) ||
-	    (view_format == VK_FORMAT_R32G32B32A32_SFLOAT && swizzle == DstSel(5, 6, 7, 4));
+	    (view_format == vk::Format::eR32G32B32A32Sfloat && swizzle == DstSel(5, 6, 7, 4));
 	if ((image_format != view_format &&
 	     !IsBgraSrgbStorageView(image_format, view_format, swizzle)) ||
 	    !swizzle_ok) {
@@ -212,8 +215,8 @@ ValidateStorageImageResource(const ShaderRecompiler::IR::ImageResource& resource
 
 namespace ImageViewOps {
 
-[[nodiscard]] VkImageAspectFlags DepthAspectMask(VkFormat format) noexcept;
-[[nodiscard]] bool               FormatSupportsStorage(GraphicContext* ctx, VkFormat format);
+[[nodiscard]] vk::ImageAspectFlags DepthAspectMask(vk::Format format);
+[[nodiscard]] bool                 FormatSupportsStorage(GraphicContext* ctx, vk::Format format);
 
 void CreateRenderTargetViews(GraphicContext* ctx, RenderTextureVulkanImage* image);
 void CreateDepthViews(GraphicContext* ctx, DepthStencilVulkanImage* image);

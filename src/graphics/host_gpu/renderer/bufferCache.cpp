@@ -9,7 +9,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/resourceMutex.h"
 #include "graphics/host_gpu/renderer/textureCache.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vma.h"
 #include "kernel/memory.h"
 
@@ -21,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <thread>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -421,10 +422,10 @@ struct BufferCache::ReadbackWorker {
 						     i, family, ctx->queues[i].family);
 					}
 				}
-				readback.usage           = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-				readback.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-				                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-				                           VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+				readback.usage           = vk::BufferUsageFlagBits::eTransferDst;
+				readback.memory.property = vk::MemoryPropertyFlagBits::eHostVisible |
+				                           vk::MemoryPropertyFlagBits::eHostCoherent |
+				                           vk::MemoryPropertyFlagBits::eHostCached;
 				VulkanCreateBuffer(ctx, READBACK_CAPACITY, &readback);
 				VulkanMapMemory(ctx, &readback.memory, &mapped);
 				command = std::make_unique<CommandBuffer>(GraphicContext::QUEUE_UTIL);
@@ -456,9 +457,9 @@ struct BufferCache::ReadbackWorker {
 				     " page=0x%016" PRIx64 " buffer=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 				     vaddr, page, cached.vaddr, cached.size);
 			}
-			uint32_t                                      data_offset = 0;
-			std::array<VkBufferCopy, MAX_RANGES>          copies {};
-			std::array<VkBufferMemoryBarrier, MAX_RANGES> barriers {};
+			uint32_t                                        data_offset = 0;
+			std::array<vk::BufferCopy, MAX_RANGES>          copies {};
+			std::array<vk::BufferMemoryBarrier, MAX_RANGES> barriers {};
 			cache.m_gpu_modified_ranges.ForEachIntersection(
 			    page, TRACKER_PAGE_SIZE, [&](RangeSet::Range range) {
 				    if (range_count == MAX_RANGES || (range.address - cached.vaddr) % 4 != 0 ||
@@ -475,9 +476,9 @@ struct BufferCache::ReadbackWorker {
 				                                   .dstOffset = data_offset,
 				                                   .size      = range.size};
 				    auto& barrier               = barriers[range_count];
-				    barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-				    barrier.srcAccessMask       = VK_ACCESS_MEMORY_WRITE_BIT;
-				    barrier.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+				    barrier.sType               = vk::StructureType::eBufferMemoryBarrier;
+				    barrier.srcAccessMask       = vk::AccessFlagBits::eMemoryWrite;
+				    barrier.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
 				    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				    barrier.buffer              = cached.buffer->buffer;
@@ -498,13 +499,13 @@ struct BufferCache::ReadbackWorker {
 				    " count=%u bytes=%u\n",
 				    page, range_count, data_offset);
 			}
-			auto* vk_buffer = command->GetPool()->buffers[command->GetIndex()];
+			auto vk_buffer = command->Handle();
 			command->Begin();
-			vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-			                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, range_count,
-			                     barriers.data(), 0, nullptr);
-			vkCmdCopyBuffer(vk_buffer, cached.buffer->buffer, readback.buffer, range_count,
-			                copies.data());
+			vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+			                          vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags {},
+			                          0, nullptr, range_count, barriers.data(), 0, nullptr);
+			vk_buffer.copyBuffer(cached.buffer->buffer, readback.buffer, range_count,
+			                     copies.data());
 			command->End();
 			command->Execute();
 			command->WaitForFenceAndReset();
@@ -562,7 +563,7 @@ BufferCache::~BufferCache() {
 		}
 	}
 	if (!m_buffers.empty()) {
-		VulkanDeviceWaitIdle(m_buffers.begin()->second->ctx);
+		Transfer::WaitForGraphicsIdle(m_buffers.begin()->second->ctx);
 	}
 	m_buffers.clear();
 }
@@ -628,8 +629,8 @@ void BufferCache::UnmapMemory(uint64_t vaddr, uint64_t size) {
 			    const auto ranges = m_gpu_modified_ranges.Intersections(address, bytes);
 			    for (const auto& range: ranges) {
 				    std::vector<uint8_t> data(range.size);
-				    UtilDownloadBuffer(cached->ctx, cached->buffer.get(), range.address - begin,
-				                       data.data(), range.size);
+				    Transfer::DownloadBuffer(cached->ctx, cached->buffer.get(),
+				                             range.address - begin, data.data(), range.size);
 				    Libs::LibKernel::Memory::WriteBacking(range.address, data.data(), data.size());
 				    downloaded += range.size;
 			    }
@@ -687,10 +688,10 @@ std::pair<VulkanBuffer*, uint64_t> BufferCache::ObtainBuffer(CommandBuffer*  com
 	    !texture_region.gpu_metadata_bytes) {
 		std::array<uint8_t, CACHING_PAGE_SIZE> guest_data;
 		if (Libs::LibKernel::Memory::TryReadBacking(vaddr, guest_data.data(), size)) {
-			VulkanBuffer* stream_buffer    = nullptr;
-			VkDeviceSize  stream_offset    = 0;
-			VkDeviceSize  stream_range     = 0;
-			const auto    stream_alignment = std::max<uint64_t>(ctx->StorageMinAlignment(), 16);
+			VulkanBuffer*  stream_buffer    = nullptr;
+			vk::DeviceSize stream_offset    = 0;
+			vk::DeviceSize stream_range     = 0;
+			const auto     stream_alignment = std::max<uint64_t>(ctx->StorageMinAlignment(), 16);
 			if (UploadHostData(command, ctx, guest_data.data(), size, stream_alignment,
 			                   &stream_buffer, &stream_offset, &stream_range)) {
 				return {stream_buffer, stream_offset};
@@ -781,10 +782,10 @@ std::pair<VulkanBuffer*, uint64_t> BufferCache::ObtainBuffer(CommandBuffer*  com
 				    },
 				    [&]() noexcept {
 					    for (const auto& [upload_vaddr, upload_size]: uploads) {
-						    UtilUploadBuffer(ctx, StagingBufferType::Vertex, old.buffer.get(),
-						                     upload_vaddr - old.vaddr,
-						                     reinterpret_cast<const void*>(upload_vaddr),
-						                     upload_size);
+						    Transfer::UploadBuffer(ctx, Transfer::StagingBufferType::Vertex,
+						                           old.buffer.get(), upload_vaddr - old.vaddr,
+						                           reinterpret_cast<const void*>(upload_vaddr),
+						                           upload_size);
 					    }
 				    });
 			}
@@ -795,20 +796,20 @@ std::pair<VulkanBuffer*, uint64_t> BufferCache::ObtainBuffer(CommandBuffer*  com
 		cached->ctx    = ctx;
 		cached->buffer = MakeSharedVulkanBuffer(ctx);
 		cached->buffer->usage =
-		    VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-		    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-		    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-		cached->buffer->memory.property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		    vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst |
+		    vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer |
+		    vk::BufferUsageFlagBits::eStorageBuffer;
+		cached->buffer->memory.property = vk::MemoryPropertyFlagBits::eDeviceLocal;
 		VulkanCreateBuffer(ctx, cached->size, cached->buffer.get());
 		if (!overlaps.empty()) {
-			auto* vk_buffer = command->GetPool()->buffers[command->GetIndex()];
-			std::vector<VkBufferMemoryBarrier> before;
+			auto                                 vk_buffer = command->Handle();
+			std::vector<vk::BufferMemoryBarrier> before;
 			before.reserve(overlaps.size() + 1);
 			for (const auto& overlap: overlaps) {
-				VkBufferMemoryBarrier barrier {};
-				barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-				barrier.srcAccessMask       = VK_ACCESS_MEMORY_WRITE_BIT;
-				barrier.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+				vk::BufferMemoryBarrier barrier {};
+				barrier.sType               = vk::StructureType::eBufferMemoryBarrier;
+				barrier.srcAccessMask       = vk::AccessFlagBits::eMemoryWrite;
+				barrier.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
 				barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				barrier.buffer              = overlap->second->buffer->buffer;
@@ -816,37 +817,38 @@ std::pair<VulkanBuffer*, uint64_t> BufferCache::ObtainBuffer(CommandBuffer*  com
 				barrier.size                = overlap->second->size;
 				before.push_back(barrier);
 			}
-			VkBufferMemoryBarrier destination {};
-			destination.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-			destination.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+			vk::BufferMemoryBarrier destination {};
+			destination.sType               = vk::StructureType::eBufferMemoryBarrier;
+			destination.dstAccessMask       = vk::AccessFlagBits::eTransferWrite;
 			destination.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			destination.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			destination.buffer              = cached->buffer->buffer;
 			destination.offset              = 0;
 			destination.size                = cached->size;
 			before.push_back(destination);
-			vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-			                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0,
-			                     nullptr, static_cast<uint32_t>(before.size()), before.data(), 0,
-			                     nullptr);
+			vk_buffer.pipelineBarrier(
+			    vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer,
+			    vk::DependencyFlagBits::eByRegion, 0, nullptr, static_cast<uint32_t>(before.size()),
+			    before.data(), 0, nullptr);
 			for (const auto& overlap: overlaps) {
-				const auto&        old = *overlap->second;
-				const VkBufferCopy copy {
+				const auto&          old = *overlap->second;
+				const vk::BufferCopy copy {
 				    .srcOffset = 0, .dstOffset = old.vaddr - cached->vaddr, .size = old.size};
-				vkCmdCopyBuffer(vk_buffer, old.buffer->buffer, cached->buffer->buffer, 1, &copy);
+				vk_buffer.copyBuffer(old.buffer->buffer, cached->buffer->buffer, 1, &copy);
 			}
-			VkBufferMemoryBarrier after {};
-			after.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-			after.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
-			after.dstAccessMask       = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+			vk::BufferMemoryBarrier after {};
+			after.sType         = vk::StructureType::eBufferMemoryBarrier;
+			after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+			after.dstAccessMask =
+			    vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
 			after.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			after.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			after.buffer              = cached->buffer->buffer;
 			after.offset              = 0;
 			after.size                = cached->size;
-			vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-			                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0,
-			                     nullptr, 1, &after, 0, nullptr);
+			vk_buffer.pipelineBarrier(
+			    vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eAllCommands,
+			    vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &after, 0, nullptr);
 			for (const auto& overlap: overlaps) {
 				command->RetainResourceUntilFence(overlap->second->buffer);
 				m_buffers.erase(overlap);
@@ -865,9 +867,9 @@ std::pair<VulkanBuffer*, uint64_t> BufferCache::ObtainBuffer(CommandBuffer*  com
 	    },
 	    [&]() noexcept {
 		    for (const auto& [upload_vaddr, upload_size]: ranges) {
-			    UtilUploadBuffer(ctx, StagingBufferType::Vertex, cached.buffer.get(),
-			                     upload_vaddr - cached.vaddr,
-			                     reinterpret_cast<const void*>(upload_vaddr), upload_size);
+			    Transfer::UploadBuffer(ctx, Transfer::StagingBufferType::Vertex,
+			                           cached.buffer.get(), upload_vaddr - cached.vaddr,
+			                           reinterpret_cast<const void*>(upload_vaddr), upload_size);
 		    }
 	    });
 	if (is_written) {
@@ -896,12 +898,13 @@ VulkanBuffer* BufferCache::ObtainNullBuffer(CommandBuffer* command, GraphicConte
 	if (m_null_buffer == nullptr) {
 		// robustBufferAccess makes every fetch safe; TODO: Use a
 		// persistent 16-byte fallback when Vulkan null vertex descriptors are unavailable.
-		auto buffer   = MakeSharedVulkanBuffer(ctx);
-		buffer->usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-		                VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-		buffer->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) |
-		                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-		                          VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+		auto buffer             = MakeSharedVulkanBuffer(ctx);
+		buffer->usage           = vk::BufferUsageFlagBits::eStorageBuffer |
+		                          vk::BufferUsageFlagBits::eVertexBuffer |
+		                          vk::BufferUsageFlagBits::eIndexBuffer;
+		buffer->memory.property = vk::MemoryPropertyFlagBits::eHostVisible |
+		                          vk::MemoryPropertyFlagBits::eHostCoherent |
+		                          vk::MemoryPropertyFlagBits::eHostCached;
 		VulkanCreateBuffer(ctx, 16, buffer.get());
 		void* data = nullptr;
 		VulkanMapMemory(ctx, &buffer->memory, &data);
@@ -961,7 +964,7 @@ BufferImageCopySource BufferCache::ObtainBufferForImage(uint64_t vaddr, uint64_t
 		for (const auto& range: dirty_ranges) {
 			auto& owner = find_owner(range.address, range.size);
 			if (std::find(waited.begin(), waited.end(), owner.ctx) == waited.end()) {
-				VulkanDeviceWaitIdle(owner.ctx);
+				Transfer::WaitForGraphicsIdle(owner.ctx);
 				waited.push_back(owner.ctx);
 			}
 		}
@@ -983,8 +986,8 @@ BufferImageCopySource BufferCache::ObtainBufferForImage(uint64_t vaddr, uint64_t
 				    auto&                owner         = find_owner(range.address, range.size);
 				    const auto           buffer_offset = range.address - owner.vaddr;
 				    std::vector<uint8_t> data(range.size);
-				    UtilDownloadBuffer(owner.ctx, owner.buffer.get(), buffer_offset, data.data(),
-				                       range.size);
+				    Transfer::DownloadBuffer(owner.ctx, owner.buffer.get(), buffer_offset,
+				                             data.data(), range.size);
 				    Libs::LibKernel::Memory::WriteBacking(range.address, data.data(), data.size());
 				    downloaded += range.size;
 			    }
@@ -1018,9 +1021,9 @@ BufferImageCopySource BufferCache::ObtainBufferForImage(uint64_t vaddr, uint64_t
 		    },
 		    [&]() noexcept {
 			    for (const auto& [address, bytes]: uploads) {
-				    UtilUploadBuffer(cached.ctx, StagingBufferType::Vertex, cached.buffer.get(),
-				                     address - cached.vaddr, reinterpret_cast<const void*>(address),
-				                     bytes);
+				    Transfer::UploadBuffer(cached.ctx, Transfer::StagingBufferType::Vertex,
+				                           cached.buffer.get(), address - cached.vaddr,
+				                           reinterpret_cast<const void*>(address), bytes);
 			    }
 		    });
 		if (uploads.empty()) {
@@ -1040,8 +1043,8 @@ BufferImageCopySource BufferCache::ObtainBufferForImage(uint64_t vaddr, uint64_t
 }
 
 namespace {
-VkBufferMemoryBarrier MakeDmaBarrier(VulkanBuffer* buffer, uint64_t offset, uint64_t size,
-                                     VkAccessFlags source, VkAccessFlags destination) {
+vk::BufferMemoryBarrier MakeDmaBarrier(VulkanBuffer* buffer, uint64_t offset, uint64_t size,
+                                       vk::AccessFlags source, vk::AccessFlags destination) {
 	if (buffer == nullptr || buffer->buffer == nullptr || size == 0 ||
 	    offset > buffer->buffer_size || size > buffer->buffer_size - offset) {
 		EXIT("BufferCache: invalid DMA barrier, buffer=%p handle=%p offset=0x%016" PRIx64
@@ -1050,8 +1053,8 @@ VkBufferMemoryBarrier MakeDmaBarrier(VulkanBuffer* buffer, uint64_t offset, uint
 		     buffer == nullptr ? nullptr : static_cast<const void*>(buffer->buffer), offset, size,
 		     buffer == nullptr ? 0 : buffer->buffer_size);
 	}
-	VkBufferMemoryBarrier barrier {};
-	barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	vk::BufferMemoryBarrier barrier {};
+	barrier.sType               = vk::StructureType::eBufferMemoryBarrier;
 	barrier.srcAccessMask       = source;
 	barrier.dstAccessMask       = destination;
 	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1062,17 +1065,12 @@ VkBufferMemoryBarrier MakeDmaBarrier(VulkanBuffer* buffer, uint64_t offset, uint
 	return barrier;
 }
 
-VkCommandBuffer GetDmaCommandBuffer(CommandBuffer* command) {
-	if (command == nullptr || command->IsInvalid() || command->GetPool() == nullptr ||
-	    command->GetIndex() >= command->GetPool()->buffers_count) {
+vk::CommandBuffer GetDmaCommandBuffer(CommandBuffer* command) {
+	if (command == nullptr) {
 		EXIT("BufferCache: invalid DMA command buffer, command=%p\n",
 		     static_cast<const void*>(command));
 	}
-	const auto vk_buffer = command->GetPool()->buffers[command->GetIndex()];
-	if (vk_buffer == nullptr) {
-		EXIT("BufferCache: DMA command buffer handle is null, index=%u\n", command->GetIndex());
-	}
-	return vk_buffer;
+	return command->Handle();
 }
 } // namespace
 
@@ -1113,19 +1111,20 @@ void BufferCache::FillBuffer(CommandBuffer* command, GraphicContext* ctx, uint64
 		}
 	}
 	const auto [dst, dst_offset] = ObtainBuffer(command, ctx, vaddr, size, true, false);
-	const auto before    = MakeDmaBarrier(dst, dst_offset, size,
-	                                      VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
-	                                      VK_ACCESS_TRANSFER_WRITE_BIT);
+	const auto before            = MakeDmaBarrier(
+	    dst, dst_offset, size, vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
+	    vk::AccessFlagBits::eTransferWrite);
 	const auto vk_buffer = GetDmaCommandBuffer(command);
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-	                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 1,
-	                     &before, 0, nullptr);
-	vkCmdFillBuffer(vk_buffer, dst->buffer, dst_offset, size, value);
-	const auto after = MakeDmaBarrier(dst, dst_offset, size, VK_ACCESS_TRANSFER_WRITE_BIT,
-	                                  VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-	                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0,
-	                     nullptr, 1, &after, 0, nullptr);
+	vk_buffer.pipelineBarrier(
+	    vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer,
+	    vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &before, 0, nullptr);
+	vk_buffer.fillBuffer(dst->buffer, dst_offset, size, value);
+	const auto after =
+	    MakeDmaBarrier(dst, dst_offset, size, vk::AccessFlagBits::eTransferWrite,
+	                   vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite);
+	vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	                          vk::PipelineStageFlagBits::eAllCommands,
+	                          vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &after, 0, nullptr);
 }
 
 void BufferCache::CopyBuffer(CommandBuffer* command, GraphicContext* ctx, uint64_t dst_vaddr,
@@ -1200,28 +1199,28 @@ void BufferCache::CopyBuffer(CommandBuffer* command, GraphicContext* ctx, uint64
 		     " dst_offset=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 		     src_offset, dst_offset, size);
 	}
-	const VkBufferMemoryBarrier before[] = {
+	const vk::BufferMemoryBarrier before[] = {
 	    MakeDmaBarrier(dst, dst_offset, size,
-	                   VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
-	                   VK_ACCESS_TRANSFER_WRITE_BIT),
-	    MakeDmaBarrier(src, src_offset, size, VK_ACCESS_MEMORY_WRITE_BIT,
-	                   VK_ACCESS_TRANSFER_READ_BIT),
+	                   vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
+	                   vk::AccessFlagBits::eTransferWrite),
+	    MakeDmaBarrier(src, src_offset, size, vk::AccessFlagBits::eMemoryWrite,
+	                   vk::AccessFlagBits::eTransferRead),
 	};
 	const auto vk_buffer = GetDmaCommandBuffer(command);
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-	                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 2,
-	                     before, 0, nullptr);
-	const VkBufferCopy copy {src_offset, dst_offset, size};
-	vkCmdCopyBuffer(vk_buffer, src->buffer, dst->buffer, 1, &copy);
-	const VkBufferMemoryBarrier after[] = {
-	    MakeDmaBarrier(dst, dst_offset, size, VK_ACCESS_TRANSFER_WRITE_BIT,
-	                   VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT),
-	    MakeDmaBarrier(src, src_offset, size, VK_ACCESS_TRANSFER_READ_BIT,
-	                   VK_ACCESS_MEMORY_WRITE_BIT),
+	vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+	                          vk::PipelineStageFlagBits::eTransfer,
+	                          vk::DependencyFlagBits::eByRegion, 0, nullptr, 2, before, 0, nullptr);
+	const vk::BufferCopy copy {src_offset, dst_offset, size};
+	vk_buffer.copyBuffer(src->buffer, dst->buffer, 1, &copy);
+	const vk::BufferMemoryBarrier after[] = {
+	    MakeDmaBarrier(dst, dst_offset, size, vk::AccessFlagBits::eTransferWrite,
+	                   vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite),
+	    MakeDmaBarrier(src, src_offset, size, vk::AccessFlagBits::eTransferRead,
+	                   vk::AccessFlagBits::eMemoryWrite),
 	};
-	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-	                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0,
-	                     nullptr, 2, after, 0, nullptr);
+	vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	                          vk::PipelineStageFlagBits::eAllCommands,
+	                          vk::DependencyFlagBits::eByRegion, 0, nullptr, 2, after, 0, nullptr);
 }
 
 bool BufferCache::HasPageOverlap(uint64_t vaddr, uint64_t size) {
@@ -1305,27 +1304,10 @@ void BufferCache::SetTextureCache(TextureCache& texture_cache) {
 	m_texture_cache = &texture_cache;
 }
 
-// TODO: add LRU cache
-void BufferCache::RegisterForDelete(VulkanBuffer* buffer) {
-	FaultSafeCacheLock lock(this, m_mutex);
-
-	m_delete_later.push_back(buffer);
-}
-
-void BufferCache::DeleteAll(GraphicContext* ctx) {
-	KYTY_PROFILER_BLOCK("BufferCache::DeleteAll");
+void BufferCache::ResetNullBuffer() {
+	KYTY_PROFILER_BLOCK("BufferCache::ResetNullBuffer");
 
 	FaultSafeCacheLock lock(this, m_mutex);
-
-	for (auto* buffer: m_delete_later) {
-		EXIT_IF(buffer == nullptr);
-		EXIT_IF(buffer->buffer == nullptr);
-		EXIT_IF(ctx == nullptr);
-
-		VulkanDeleteBuffer(ctx, buffer);
-		delete buffer;
-	}
-	m_delete_later.clear();
 	m_null_buffer.reset();
 }
 

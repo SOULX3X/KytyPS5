@@ -1168,7 +1168,7 @@ static bool ScissorClipRuleToIntersectionMask(uint16_t rule, uint8_t* mask) {
 }
 
 ScissorRect calc_final_scissor(const HW::ScreenViewport& vp, const HW::ScanModeControl& smc,
-                               VkExtent2D extent) {
+                               vk::Extent2D extent) {
 	ScissorRect screen {vp.screen_scissor_left, vp.screen_scissor_top, vp.screen_scissor_right,
 	                    vp.screen_scissor_bottom};
 	ScissorRect final = screen;

@@ -3,8 +3,7 @@
 
 #include "common/abi.h"
 #include "common/common.h"
-
-struct VkSurfaceCapabilitiesKHR;
+#include "graphics/host_gpu/vulkanCommon.h"
 
 namespace Libs::Graphics {
 
@@ -13,7 +12,7 @@ class CommandBuffer;
 struct VideoOutVulkanImage;
 struct PreparedFrame;
 
-VkSurfaceCapabilitiesKHR* VulkanGetSurfaceCapabilities();
+vk::SurfaceCapabilitiesKHR* VulkanGetSurfaceCapabilities();
 
 GraphicContext* WindowGetGraphicContext();
 

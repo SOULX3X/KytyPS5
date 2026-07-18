@@ -8,12 +8,12 @@
 #include "graphics/host_gpu/renderer/imageInfo.h"
 #include "graphics/host_gpu/renderer/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/tiler.h"
+#include "graphics/host_gpu/vulkanCommon.h"
 
 #include <map>
 #include <memory>
 #include <mutex>
 #include <vector>
-#include <vulkan/vulkan_core.h>
 
 namespace Libs::Graphics {
 
@@ -68,37 +68,35 @@ public:
 	                                           bool formatted_buffer_write = false);
 	[[nodiscard]] RenderTextureVulkanImage* FindRenderTargetByRange(CommandBuffer* command,
 	                                                                uint64_t vaddr, uint64_t size);
-	[[nodiscard]] VkImageView GetRenderTargetAttachmentView(GraphicContext*           ctx,
-	                                                        RenderTextureVulkanImage* image,
-	                                                        VkFormat format, uint32_t level,
-	                                                        uint32_t base_layer,
-	                                                        uint32_t layer_count);
-	[[nodiscard]] VkImageView GetDepthTargetAttachmentView(GraphicContext*          ctx,
-	                                                       DepthStencilVulkanImage* image,
-	                                                       uint32_t                 base_layer,
-	                                                       uint32_t                 layer_count);
-	[[nodiscard]] VkImageView GetDepthTargetSampledView(GraphicContext*          ctx,
-	                                                    DepthStencilVulkanImage* image,
-	                                                    VkFormat view_format, uint32_t swizzle,
-	                                                    uint32_t base_level, uint32_t level_count,
-	                                                    VkImageViewType type, uint32_t base_layer,
-	                                                    uint32_t layer_count);
-	[[nodiscard]] VkImageView GetSampledColorView(GraphicContext* ctx, VulkanImage* image,
-	                                              VkFormat view_format, uint32_t swizzle,
-	                                              uint32_t base_level, uint32_t level_count,
-	                                              VkImageViewType type, uint32_t base_layer,
-	                                              uint32_t layer_count);
-	[[nodiscard]] VkImageView GetRenderTargetStorageView(GraphicContext*           ctx,
-	                                                     RenderTextureVulkanImage* image,
-	                                                     VkFormat view_format, uint32_t base_level,
-	                                                     uint32_t level_count, VkImageViewType type,
-	                                                     uint32_t base_layer, uint32_t layer_count);
-	[[nodiscard]] VkImageView GetStorageTextureSampledView(GraphicContext*            ctx,
-	                                                       StorageTextureVulkanImage* image,
-	                                                       const ImageInfo&           info);
-	[[nodiscard]] VkImageView GetStorageTextureStorageView(GraphicContext*            ctx,
-	                                                       StorageTextureVulkanImage* image,
-	                                                       uint32_t                   base_level);
+	[[nodiscard]] vk::ImageView GetRenderTargetAttachmentView(GraphicContext*           ctx,
+	                                                          RenderTextureVulkanImage* image,
+	                                                          vk::Format format, uint32_t level,
+	                                                          uint32_t base_layer,
+	                                                          uint32_t layer_count);
+	[[nodiscard]] vk::ImageView GetDepthTargetAttachmentView(GraphicContext*          ctx,
+	                                                         DepthStencilVulkanImage* image,
+	                                                         uint32_t                 base_layer,
+	                                                         uint32_t                 layer_count);
+	[[nodiscard]] vk::ImageView
+	GetDepthTargetSampledView(GraphicContext* ctx, DepthStencilVulkanImage* image,
+	                          vk::Format view_format, uint32_t swizzle, uint32_t base_level,
+	                          uint32_t level_count, vk::ImageViewType type, uint32_t base_layer,
+	                          uint32_t layer_count);
+	[[nodiscard]] vk::ImageView GetSampledColorView(GraphicContext* ctx, VulkanImage* image,
+	                                                vk::Format view_format, uint32_t swizzle,
+	                                                uint32_t base_level, uint32_t level_count,
+	                                                vk::ImageViewType type, uint32_t base_layer,
+	                                                uint32_t layer_count);
+	[[nodiscard]] vk::ImageView
+	GetRenderTargetStorageView(GraphicContext* ctx, RenderTextureVulkanImage* image,
+	                           vk::Format view_format, uint32_t base_level, uint32_t level_count,
+	                           vk::ImageViewType type, uint32_t base_layer, uint32_t layer_count);
+	[[nodiscard]] vk::ImageView GetStorageTextureSampledView(GraphicContext*            ctx,
+	                                                         StorageTextureVulkanImage* image,
+	                                                         const ImageInfo&           info);
+	[[nodiscard]] vk::ImageView GetStorageTextureStorageView(GraphicContext*            ctx,
+	                                                         StorageTextureVulkanImage* image,
+	                                                         uint32_t                   base_level);
 	[[nodiscard]] DepthStencilVulkanImage*
 	FindDepthTargetByRange(CommandBuffer* command, uint64_t vaddr, uint64_t size,
 	                       bool allow_containing_sampled = false);
@@ -126,12 +124,12 @@ private:
 		uint32_t clear_mask   = 0;
 		bool     gpu_modified = false;
 	};
-	[[nodiscard]] VkImageView  GetImageView(GraphicContext* ctx, VulkanImage* image,
-	                                        const ImageViewInfo& info);
-	[[nodiscard]] bool         HasMetaOverlapLocked(uint64_t vaddr, uint64_t size) const;
-	[[nodiscard]] CachedImage* FindGpuReadbackPageCandidateLocked(uint64_t vaddr, uint64_t size);
-	void                       RequireNoMetaOverlapLocked(uint64_t vaddr, uint64_t size) const;
-	void                       MarkSampledAliasesCpuDirtyLocked(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] vk::ImageView GetImageView(GraphicContext* ctx, VulkanImage* image,
+	                                         const ImageViewInfo& info);
+	[[nodiscard]] bool          HasMetaOverlapLocked(uint64_t vaddr, uint64_t size) const;
+	[[nodiscard]] CachedImage*  FindGpuReadbackPageCandidateLocked(uint64_t vaddr, uint64_t size);
+	void                        RequireNoMetaOverlapLocked(uint64_t vaddr, uint64_t size) const;
+	void                        MarkSampledAliasesCpuDirtyLocked(uint64_t vaddr, uint64_t size);
 	void RetireSampledTargetAliases(GraphicContext* ctx, const ImageInfo& requested);
 	void ResolveStorageImageOverlaps(GraphicContext* ctx, const ImageInfo& requested);
 	void RetireStorageDepthAliasLocked(GraphicContext* ctx, const ImageInfo& requested);

@@ -4,7 +4,7 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
-#include "graphics/host_gpu/utils.h"
+#include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vma.h"
 
 #include <atomic>
@@ -32,12 +32,13 @@ void HostStreamBuffer::EnsureBuffer(GraphicContext* ctx) {
 	KYTY_PROFILER_BLOCK("HostStreamBuffer::create");
 	m_ctx           = ctx;
 	m_buffer        = std::make_unique<VulkanBuffer>();
-	m_buffer->usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-	                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-	                  VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-	m_buffer->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) |
-	                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-	                            VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+	m_buffer->usage = vk::BufferUsageFlagBits::eStorageBuffer |
+	                  vk::BufferUsageFlagBits::eVertexBuffer |
+	                  vk::BufferUsageFlagBits::eIndexBuffer |
+	                  vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst;
+	m_buffer->memory.property = vk::MemoryPropertyFlagBits::eHostVisible |
+	                            vk::MemoryPropertyFlagBits::eHostCoherent |
+	                            vk::MemoryPropertyFlagBits::eHostCached;
 	VulkanCreateBuffer(ctx, CAPACITY, m_buffer.get());
 	VulkanMapMemory(ctx, &m_buffer->memory, &m_mapped);
 	const auto count = g_stream_buffer_count.fetch_add(1, std::memory_order_relaxed) + 1;

@@ -4,13 +4,14 @@
 #include "common/abi.h"
 #include "common/common.h"
 #include "common/threads.h"
+#include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
 #include "graphics/host_gpu/vulkanInstance.h"
 
+#include <array>
 #include <memory>
 #include <mutex>
 #include <vector>
 #include <vk_mem_alloc.h>
-#include <vulkan/vulkan_core.h> // IWYU pragma: export
 
 namespace Libs::Graphics {
 
@@ -19,42 +20,43 @@ class CommandBuffer;
 struct VulkanSwapchain {
 	~VulkanSwapchain();
 
-	VkSwapchainKHR                 swapchain        = nullptr;
-	VkFormat                       swapchain_format = VK_FORMAT_UNDEFINED;
-	VkExtent2D                     swapchain_extent = {};
-	std::unique_ptr<VkImage[]>     swapchain_images;
-	std::unique_ptr<VkImageView[]> swapchain_image_views;
-	uint32_t                       swapchain_images_count = 0;
-	std::unique_ptr<VkSemaphore[]> image_acquired_semaphores;
-	std::unique_ptr<VkSemaphore[]> render_complete_semaphores;
-	uint32_t                       current_index = 0;
-	uint32_t                       present_frame = 0;
+	vk::SwapchainKHR                 swapchain        = nullptr;
+	vk::Format                       swapchain_format = vk::Format::eUndefined;
+	vk::Extent2D                     swapchain_extent = {};
+	std::unique_ptr<vk::Image[]>     swapchain_images;
+	std::unique_ptr<vk::ImageView[]> swapchain_image_views;
+	uint32_t                         swapchain_images_count = 0;
+	std::unique_ptr<vk::Semaphore[]> image_acquired_semaphores;
+	std::unique_ptr<vk::Semaphore[]> render_complete_semaphores;
+	uint32_t                         current_index = 0;
+	uint32_t                         present_frame = 0;
 };
 
 struct VulkanCommandPool {
-	Common::Mutex                      mutex;
-	VkCommandPool                      pool = nullptr;
-	std::unique_ptr<VkCommandBuffer[]> buffers;
-	std::unique_ptr<VkFence[]>         fences;
-	std::unique_ptr<VkSemaphore[]>     semaphores;
-	std::unique_ptr<bool[]>            busy;
-	uint32_t                           buffers_count = 0;
+	Common::Mutex                        mutex;
+	vk::CommandPool                      pool = nullptr;
+	std::unique_ptr<vk::CommandBuffer[]> buffers;
+	std::unique_ptr<vk::Fence[]>         fences;
+	std::unique_ptr<vk::Semaphore[]>     semaphores;
+	std::unique_ptr<bool[]>              busy;
+	uint32_t                             buffers_count = 0;
 };
 
 struct GraphicContext: public VulkanInstance {
-	uint32_t screen_width  = 0;
-	uint32_t screen_height = 0;
+	uint32_t                              screen_width  = 0;
+	uint32_t                              screen_height = 0;
+	std::array<Common::Mutex, QUEUES_NUM> queue_mutexes;
 };
 
 struct VulkanMemory {
-	VkMemoryRequirements  requirements    = {};
-	VkMemoryPropertyFlags property        = 0;
-	VkDeviceMemory        memory          = nullptr;
-	VmaAllocation         allocation      = nullptr;
-	VmaAllocationInfo     allocation_info = {};
-	VkDeviceSize          offset          = 0;
-	uint32_t              type            = 0;
-	uint64_t              unique_id       = 0;
+	vk::MemoryRequirements  requirements    = {};
+	vk::MemoryPropertyFlags property        = {};
+	vk::DeviceMemory        memory          = nullptr;
+	VmaAllocation           allocation      = nullptr;
+	VmaAllocationInfo       allocation_info = {};
+	vk::DeviceSize          offset          = 0;
+	uint32_t                type            = 0;
+	uint64_t                unique_id       = 0;
 };
 
 enum class VulkanImageType {
@@ -67,22 +69,22 @@ enum class VulkanImageType {
 };
 
 struct ImageViewInfo {
-	VkFormat           format      = VK_FORMAT_UNDEFINED;
-	VkImageViewType    type        = VK_IMAGE_VIEW_TYPE_2D;
-	VkImageAspectFlags aspect      = 0;
-	uint32_t           base_level  = 0;
-	uint32_t           level_count = 0;
-	uint32_t           base_layer  = 0;
-	uint32_t           layer_count = 1;
-	uint32_t           swizzle     = 0;
-	VkImageUsageFlags  usage       = VK_IMAGE_USAGE_SAMPLED_BIT;
+	vk::Format           format      = vk::Format::eUndefined;
+	vk::ImageViewType    type        = vk::ImageViewType::e2D;
+	vk::ImageAspectFlags aspect      = {};
+	uint32_t             base_level  = 0;
+	uint32_t             level_count = 0;
+	uint32_t             base_layer  = 0;
+	uint32_t             layer_count = 1;
+	uint32_t             swizzle     = 0;
+	vk::ImageUsageFlags  usage       = vk::ImageUsageFlagBits::eSampled;
 
 	bool operator==(const ImageViewInfo&) const = default;
 };
 
 struct CachedImageView {
 	ImageViewInfo info;
-	VkImageView   view = nullptr;
+	vk::ImageView view = nullptr;
 };
 
 struct ImageViewCache {
@@ -104,14 +106,14 @@ struct VulkanImage {
 	KYTY_CLASS_NO_COPY(VulkanImage);
 
 	VulkanImageType        type                 = VulkanImageType::Unknown;
-	VkFormat               format               = VK_FORMAT_UNDEFINED;
-	VkExtent2D             extent               = {};
+	vk::Format             format               = vk::Format::eUndefined;
+	vk::Extent2D           extent               = {};
 	uint32_t               guest_pitch          = 0;
 	uint32_t               layers               = 1;
 	uint32_t               mip_levels           = 1;
-	VkImage                image                = nullptr;
-	VkImageView            image_view[VIEW_MAX] = {};
-	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
+	vk::Image              image                = nullptr;
+	vk::ImageView          image_view[VIEW_MAX] = {};
+	vk::ImageLayout        layout               = vk::ImageLayout::eUndefined;
 	Graphics::VulkanMemory memory;
 	ImageViewCache         view_cache;
 };
@@ -142,10 +144,10 @@ struct RenderTextureVulkanImage: public VulkanImage {
 };
 
 struct VulkanBuffer {
-	VkBuffer           buffer = nullptr;
-	VulkanMemory       memory;
-	VkBufferUsageFlags usage       = 0;
-	uint64_t           buffer_size = 0;
+	vk::Buffer           buffer = nullptr;
+	VulkanMemory         memory;
+	vk::BufferUsageFlags usage       = {};
+	uint64_t             buffer_size = 0;
 };
 
 struct StorageVulkanBuffer: public VulkanBuffer {};

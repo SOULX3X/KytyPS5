@@ -106,7 +106,6 @@ the Vulkan/SPIR-V validation rules.
 - Visual Studio 2022 or Build Tools 2022 with the **Desktop development with C++** workload and
   **C++ Clang tools for Windows** component
 - Qt 6 for MSVC 2022 64-bit, including Concurrent, Network, and Widgets
-- Vulkan SDK 1.3 or newer
 
 The Microsoft C++ compiler (`cl.exe`) is not supported; use `clang-cl`.
 

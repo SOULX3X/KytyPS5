@@ -242,7 +242,6 @@ bool ShaderCompileSpirvPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
                           std::vector<uint32_t>* spirv);
 bool ShaderCompileSpirvCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh,
                           ShaderComputeInputInfo* input_info, std::vector<uint32_t>* spirv);
-bool ShaderBindingResearchGuardEnabled();
 bool ShaderAddressValid(uint64_t addr);
 
 } // namespace Libs::Graphics

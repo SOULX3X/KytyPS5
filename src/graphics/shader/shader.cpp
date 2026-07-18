@@ -205,11 +205,6 @@ static void ExitShaderRecompilerFailure(const char* label, uint64_t shader_hash,
 	     reason != nullptr ? reason : "");
 }
 
-bool ShaderBindingResearchGuardEnabled() {
-	return Config::GraphicsDebugDumpEnabled() ||
-	       Config::GetShaderLogDirection() != Config::ShaderLogDirection::Silent;
-}
-
 static const ShaderBinaryInfo* GetBinaryInfo(const uint32_t* code) {
 	EXIT_IF(code == nullptr);
 
