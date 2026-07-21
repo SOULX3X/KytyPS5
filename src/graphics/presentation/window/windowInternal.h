@@ -11,8 +11,6 @@
 
 namespace Libs::Graphics {
 
-struct WindowGame;
-
 struct SurfaceCapabilities {
 	vk::SurfaceCapabilitiesKHR        capabilities {};
 	std::vector<vk::SurfaceFormatKHR> formats;
@@ -28,22 +26,19 @@ struct WindowContext {
 	bool                 window_hidden        = true;
 	vk::SurfaceKHR       surface              = nullptr;
 	SurfaceCapabilities* surface_capabilities = nullptr;
-	WindowGame*          game                 = nullptr;
 
 	char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE] = {0};
 	char processor_name[64]                            = {0};
 
-	Common::Mutex   mutex;
-	bool            graphic_initialized = false;
-	Common::CondVar graphic_initialized_condvar;
+	Common::Mutex mutex;
 };
 
 extern WindowContext* g_window_ctx;
 
 void VulkanGetSurfaceCapabilities(vk::PhysicalDevice physical_device, vk::SurfaceKHR surface,
-                                  SurfaceCapabilities* capabilities);
-VulkanSwapchain* VulkanCreateSwapchain(GraphicContext* ctx, uint32_t image_count);
-void             VulkanCreate(WindowContext* ctx);
+                                  SurfaceCapabilities& capabilities);
+VulkanSwapchain* VulkanCreateSwapchain(uint32_t image_count);
+void             VulkanCreate(WindowContext& window);
 
 void WindowUpdateIcon();
 void WindowUpdateTitle();

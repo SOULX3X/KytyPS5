@@ -9,12 +9,8 @@
 
 namespace Libs::Graphics {
 
-class CommandBuffer;
+class RenderCommandBuffer;
 struct DepthStencilVulkanImage;
-
-namespace HW {
-class Context;
-} // namespace HW
 
 inline constexpr bool depth_htile_stencil_acceleration_compatible(bool has_stencil, bool has_htile,
                                                                   bool acceleration_disabled) {
@@ -25,6 +21,7 @@ struct RenderDepthInfo {
 	vk::Format                  format                   = vk::Format::eUndefined;
 	uint32_t                    width                    = 0;
 	uint32_t                    height                   = 0;
+	uint32_t                    samples                  = 1;
 	bool                        htile                    = false;
 	uint64_t                    depth_buffer_size        = 0;
 	uint64_t                    depth_buffer_vaddr       = 0;
@@ -59,22 +56,20 @@ struct RenderDepthInfo {
 	int                         vaddr_num     = 0;
 };
 
-inline bool depth_attachment_read_only(const RenderDepthInfo* depth) {
-	EXIT_IF(depth == nullptr);
+inline bool depth_attachment_read_only(const RenderDepthInfo& depth) {
 	const bool stencil_write =
-	    depth->stencil_test_enable &&
-	    (depth->stencil_dynamic_front.writeMask != 0 || depth->stencil_dynamic_back.writeMask != 0);
-	return !depth->depth_load_clear_enable && !depth->stencil_clear_enable &&
-	       !depth->depth_write_enable && !stencil_write;
+	    depth.stencil_test_enable &&
+	    (depth.stencil_dynamic_front.writeMask != 0 || depth.stencil_dynamic_back.writeMask != 0);
+	return !depth.depth_load_clear_enable && !depth.stencil_clear_enable &&
+	       !depth.depth_write_enable && !stencil_write;
 }
 
-inline vk::ImageLayout depth_attachment_layout(const RenderDepthInfo* depth) {
+inline vk::ImageLayout depth_attachment_layout(const RenderDepthInfo& depth) {
 	return depth_attachment_read_only(depth) ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
 	                                         : vk::ImageLayout::eDepthStencilAttachmentOptimal;
 }
 
-void ResolveRenderDepthTarget(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw,
-                              RenderDepthInfo* r);
+void ResolveRenderDepthTarget(uint64_t submit_id, RenderCommandBuffer& buffer, RenderDepthInfo& r);
 void MarkRenderTargetGpuWritten(const RenderDepthInfo& target);
 
 } // namespace Libs::Graphics

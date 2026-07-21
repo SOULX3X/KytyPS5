@@ -22,13 +22,14 @@ struct VulkanFramebuffer {
 	vk::RenderPass  render_pass                                = nullptr;
 	uint64_t        render_pass_id                             = 0;
 	vk::Framebuffer framebuffer                                = nullptr;
+	uint32_t        samples                                    = 1;
 	vk::ImageLayout color_layout[RENDER_COLOR_ATTACHMENTS_MAX] = {};
 	vk::ImageLayout depth_layout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
 };
 
 inline uint64_t render_pass_compat_id(uint32_t color_count, const vk::Format* color_formats,
                                       bool with_depth, vk::Format depth_format,
-                                      vk::ImageLayout depth_layout) {
+                                      vk::ImageLayout depth_layout, uint32_t samples) {
 	uint64_t id  = 0xcbf29ce484222325ull;
 	auto     mix = [&id](uint64_t v) {
 		id ^= v;
@@ -42,21 +43,23 @@ inline uint64_t render_pass_compat_id(uint32_t color_count, const vk::Format* co
 	mix(with_depth ? 1u : 0u);
 	mix(static_cast<uint32_t>(depth_format));
 	mix(static_cast<uint32_t>(depth_layout));
-	mix(static_cast<uint32_t>(vk::SampleCountFlagBits::e1));
+	mix(samples);
 
 	return id;
 }
 
 class FramebufferCache {
 public:
-	FramebufferCache() { EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread()); }
+	explicit FramebufferCache(GraphicContext& graphics): m_graphics(graphics) {
+		EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	}
 	~FramebufferCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(FramebufferCache);
 
 	VulkanFramebuffer* CreateFramebuffer(RenderColorInfo* colors, uint32_t color_count,
-	                                     RenderDepthInfo* depth);
-	void               FreeFramebufferByColor(VulkanImage* image);
-	void               FreeFramebufferByDepth(DepthStencilVulkanImage* image);
+	                                     RenderDepthInfo& depth);
+	void               FreeFramebufferByColor(VulkanImage& image);
+	void               FreeFramebufferByDepth(DepthStencilVulkanImage& image);
 
 private:
 	struct Framebuffer {
@@ -72,6 +75,7 @@ private:
 		bool               depth_read_only                                  = false;
 	};
 
+	GraphicContext&          m_graphics;
 	Common::Mutex            m_mutex;
 	std::vector<Framebuffer> m_framebuffers;
 };

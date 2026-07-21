@@ -16,6 +16,9 @@
 namespace Libs::Graphics {
 
 class CommandBuffer;
+struct VulkanBuffer;
+struct VulkanImage;
+struct VulkanMemory;
 
 struct VulkanSwapchain {
 	~VulkanSwapchain();
@@ -43,20 +46,35 @@ struct VulkanCommandPool {
 };
 
 struct GraphicContext: public VulkanInstance {
+	[[nodiscard]] bool CreateAllocator();
+	void               DestroyAllocator();
+	void               LogMemoryBudget() const;
+	void               CreateBuffer(uint64_t size, VulkanBuffer& buffer);
+	void               DeleteBuffer(VulkanBuffer& buffer);
+	[[nodiscard]] bool CreateImage(const vk::ImageCreateInfo& info, VulkanImage& image);
+	void               DeleteImage(VulkanImage& image);
+	void               MapMemory(VulkanMemory& memory, void*& data);
+	void               UnmapMemory(VulkanMemory& memory);
+	void               AppendHardwareRayTracingDeviceExtensions(
+	    const std::vector<vk::ExtensionProperties>& available_extensions,
+	    std::vector<const char*>&                   device_extensions);
+	void LoadHardwareRayTracingFunctions() const;
+
 	uint32_t                              screen_width  = 0;
 	uint32_t                              screen_height = 0;
 	std::array<Common::Mutex, QUEUES_NUM> queue_mutexes;
 };
 
 struct VulkanMemory {
-	vk::MemoryRequirements  requirements    = {};
-	vk::MemoryPropertyFlags property        = {};
-	vk::DeviceMemory        memory          = nullptr;
-	VmaAllocation           allocation      = nullptr;
-	VmaAllocationInfo       allocation_info = {};
-	vk::DeviceSize          offset          = 0;
-	uint32_t                type            = 0;
-	uint64_t                unique_id       = 0;
+	vk::MemoryRequirements  requirements       = {};
+	vk::MemoryPropertyFlags property           = {};
+	vk::MemoryPropertyFlags preferred_property = {};
+	vk::DeviceMemory        memory             = nullptr;
+	VmaAllocation           allocation         = nullptr;
+	VmaAllocationInfo       allocation_info    = {};
+	vk::DeviceSize          offset             = 0;
+	uint32_t                type               = 0;
+	uint64_t                unique_id          = 0;
 };
 
 enum class VulkanImageType {
@@ -111,6 +129,7 @@ struct VulkanImage {
 	uint32_t               guest_pitch          = 0;
 	uint32_t               layers               = 1;
 	uint32_t               mip_levels           = 1;
+	uint32_t               samples              = 1;
 	vk::Image              image                = nullptr;
 	vk::ImageView          image_view[VIEW_MAX] = {};
 	vk::ImageLayout        layout               = vk::ImageLayout::eUndefined;
@@ -124,7 +143,9 @@ struct VideoOutVulkanImage: public VulkanImage {
 
 struct DepthStencilVulkanImage: public VulkanImage {
 	DepthStencilVulkanImage(): VulkanImage(VulkanImageType::DepthStencil) {}
-	bool compressed = false;
+	bool compressed                    = false;
+	bool initial_depth_clear_pending   = false;
+	bool initial_stencil_clear_pending = false;
 };
 
 struct GpuTextureVulkanImage: public VulkanImage {
@@ -141,6 +162,7 @@ struct StorageTextureVulkanImage: public GpuTextureVulkanImage {
 
 struct RenderTextureVulkanImage: public VulkanImage {
 	RenderTextureVulkanImage(): VulkanImage(VulkanImageType::RenderTexture) {}
+	bool initial_clear_pending = false;
 };
 
 struct VulkanBuffer {

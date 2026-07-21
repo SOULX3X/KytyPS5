@@ -25,8 +25,9 @@ static bool RenderTargetMaskHasMrt(uint32_t mask) {
 	return (mask & ~0x0fu) != 0;
 }
 
-static bool RenderTargetMaskHasBoundMrt(const HW::Context& hw) {
-	const auto mask = hw.GetRenderTargetMask();
+static bool RenderTargetMaskHasBoundMrt(const RenderCommandBuffer& buffer) {
+	const auto& hw   = buffer.GetRegisters();
+	const auto  mask = hw.GetRenderTargetMask();
 
 	if (!RenderTargetMaskHasMrt(mask)) {
 		return false;
@@ -42,8 +43,9 @@ static bool RenderTargetMaskHasBoundMrt(const HW::Context& hw) {
 	return bound_targets > 1;
 }
 
-uint32_t render_target_first_bound_slot(const HW::Context& hw) {
-	const auto mask = hw.GetRenderTargetMask();
+uint32_t render_target_first_bound_slot(const RenderCommandBuffer& buffer) {
+	const auto& hw   = buffer.GetRegisters();
+	const auto  mask = hw.GetRenderTargetMask();
 	for (uint32_t i = 0; i < 8; i++) {
 		if (render_target_mask_slot(mask, i) != 0 && hw.GetRenderTarget(i).base.addr != 0) {
 			return i;
@@ -334,7 +336,7 @@ static void RtCheck(const HW::RenderTarget& rt) {
 		if (rt.attrib.num_samples != 0x00000000 || rt.attrib.num_fragments != 0x00000000) {
 			static bool logged = false;
 			if (!logged) {
-				LOGF("RenderTarget: temporary: rendering PS5 MSAA color target as single-sample, "
+				LOGF("RenderTarget: using native PS5 MSAA color target, "
 				     "samples=0x%08" PRIx32 " fragments=0x%08" PRIx32 "\n",
 				     rt.attrib.num_samples, rt.attrib.num_fragments);
 				logged = true;
@@ -534,7 +536,7 @@ static void ZCheck(const HW::DepthRenderTarget& z) {
 		if (z.z_info.num_samples != 0x00000000) {
 			static bool logged = false;
 			if (!logged) {
-				LOGF("DepthTarget: temporary: ignoring num_samples=0x%08" PRIx32 "\n",
+				LOGF("DepthTarget: using native num_samples=0x%08" PRIx32 "\n",
 				     z.z_info.num_samples);
 				logged = true;
 			}
@@ -687,7 +689,7 @@ static void ClipCheck(const HW::ClipControl& c) {
 	// dx_linear_attr_clip_enable preserves linear (noperspective) attributes at clip-generated
 	// vertices, which Vulkan provides as part of clipping and interpolation.
 	EXIT_NOT_IMPLEMENTED(c.user_clip_planes != 0 || c.user_clip_plane_mode != 0 ||
-	                     c.vertex_kill_any || c.min_z_clip_disable || c.max_z_clip_disable ||
+	                     c.vertex_kill_any || !c.IsZClipModeRepresentable() ||
 	                     c.user_clip_plane_negate_y || c.clip_disable ||
 	                     c.user_clip_plane_cull_only || c.cull_on_clipping_error_disable ||
 	                     c.force_viewport_index_from_vs_enable);
@@ -932,7 +934,7 @@ static void EqaaCheck(const HW::EqaaControl& c) {
 	    c.incoherent_eqaa_reads || c.interpolate_comp_z || c.static_anchor_associations) {
 		static std::atomic<uint32_t> log_count {0};
 		if (log_count.fetch_add(1) < 16) {
-			LOGF("\t warning: unsupported PS5 EQAA state, rendering with single-sample fallback\n");
+			LOGF("\t warning: unsupported PS5 EQAA controls use native Vulkan MSAA defaults\n");
 		}
 	}
 }
@@ -962,8 +964,8 @@ static void AaCheck(const HW::AaSampleControl& c, const HW::AaConfig& cf) {
 	    cf.max_sample_dist != 0 || cf.msaa_exposed_samples != 0) {
 		static std::atomic<uint32_t> log_count {0};
 		if (log_count.fetch_add(1) < 16) {
-			LOGF("\t warning: unsupported PS5 AA/MSAA state, rendering with single-sample "
-			     "fallback: samples=%" PRIu8 ", exposed=%" PRIu8 ", max_dist=%" PRIu8 "\n",
+			LOGF("\t warning: unsupported PS5 sample locations use native Vulkan locations: "
+			     "samples=%" PRIu8 ", exposed=%" PRIu8 ", max_dist=%" PRIu8 "\n",
 			     cf.msaa_num_samples, cf.msaa_exposed_samples, cf.max_sample_dist);
 		}
 	}
@@ -1058,8 +1060,7 @@ static void VpCheck(const HW::ScreenViewport& vp, const HW::ScanModeControl& smc
 
 		static std::atomic<uint32_t> log_count {0};
 		if (log_count.fetch_add(1) < 16) {
-			LOGF("\t warning: unsupported PS5 MSAA raster state, rendering with single-sample "
-			     "fallback\n");
+			LOGF("\t warning: unsupported PS5 MSAA raster controls use native Vulkan defaults\n");
 		}
 	}
 	// EXIT_NOT_IMPLEMENTED(smc.vport_scissor_enable);
@@ -1242,8 +1243,9 @@ ScissorRect calc_final_scissor(const HW::ScreenViewport& vp, const HW::ScanModeC
 	return ScissorRectClamp(final, extent.width, extent.height);
 }
 
-void hw_check(const HW::Context& hw) {
-	const auto  rt_slot = render_target_first_bound_slot(hw);
+void hw_check(const RenderCommandBuffer& buffer) {
+	const auto& hw      = buffer.GetRegisters();
+	const auto  rt_slot = render_target_first_bound_slot(buffer);
 	const auto& rt      = hw.GetRenderTarget(rt_slot);
 	const auto& bc      = hw.GetBlendControl(rt_slot);
 	const auto& bclr    = hw.GetBlendColor();
@@ -1292,7 +1294,7 @@ void hw_check(const HW::Context& hw) {
 	AaCheck(aa, ac);
 	log_phase("done");
 
-	if (RenderTargetMaskHasBoundMrt(hw)) {
+	if (RenderTargetMaskHasBoundMrt(buffer)) {
 		LOGF("MRT render target mask: 0x%08" PRIx32 "\n", hw.GetRenderTargetMask());
 		for (uint32_t i = 0; i < 8; i++) {
 			const auto& mrt = hw.GetRenderTarget(i);
@@ -1313,8 +1315,9 @@ void hw_check(const HW::Context& hw) {
 	// EXIT_NOT_IMPLEMENTED(hw.GetStencilClearValue() != 0);
 }
 
-void hw_print(const HW::Context& hw) {
-	const auto  rt_slot = render_target_first_bound_slot(hw);
+void hw_print(const RenderCommandBuffer& buffer) {
+	const auto& hw      = buffer.GetRegisters();
+	const auto  rt_slot = render_target_first_bound_slot(buffer);
 	const auto& rt      = hw.GetRenderTarget(rt_slot);
 	const auto& bc      = hw.GetBlendControl(rt_slot);
 	const auto& bclr    = hw.GetBlendColor();

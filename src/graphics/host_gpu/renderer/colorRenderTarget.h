@@ -9,12 +9,8 @@
 
 namespace Libs::Graphics {
 
-class CommandBuffer;
+class RenderCommandBuffer;
 struct VulkanImage;
-
-namespace HW {
-class Context;
-} // namespace HW
 
 enum class RenderColorType {
 	NoColorOutput,
@@ -33,13 +29,14 @@ struct RenderColorInfo {
 	uint64_t                        base_addr        = 0;
 	uint64_t                        buffer_size      = 0;
 	uint32_t                        target_slot      = 0;
+	uint32_t                        samples          = 1;
 	Prospero::ColorComponentMapping export_mapping;
 	bool                            color_clear_enable = false;
 	vk::ClearColorValue             color_clear_value {};
 };
 
-void ResolveRenderColorTarget(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw,
-                              RenderColorInfo* r, uint32_t render_target_slice_offset = 0,
+void ResolveRenderColorTarget(uint64_t submit_id, RenderCommandBuffer& buffer, RenderColorInfo& r,
+                              uint32_t render_target_slice_offset    = 0,
                               uint32_t render_target_slot            = UINT32_MAX,
                               bool     ignore_target_mask            = false,
                               bool     reuse_existing_render_texture = false);

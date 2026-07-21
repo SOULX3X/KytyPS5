@@ -44,8 +44,6 @@ constexpr bool TextureHasFormatUsage(TextureFormatUsage usage, TextureFormatUsag
 
 enum class TextureUploadDestination { MipLevels, MipAtlas };
 
-enum class TextureUploadSliceLayout { MipChainPerSlice, MipLevelPerSlice };
-
 struct RenderTargetFormatInfo {
 	vk::Format                      format            = vk::Format::eUndefined;
 	uint32_t                        bytes_per_element = 0;
@@ -53,18 +51,15 @@ struct RenderTargetFormatInfo {
 };
 
 struct TextureUploadLayout {
-	uint32_t       tile                    = 0;
-	uint32_t       pitch                   = 0;
-	uint64_t       slice_stride            = 0;
-	uint64_t       source_slice_stride     = 0;
-	bool           fmt_tiled_render_target = false;
-	bool           fmt_tiled_standard256b  = false;
-	bool           fmt_tiled_standard4kb   = false;
-	bool           fmt_tiled_standard64kb  = false;
-	bool           fmt_tiled_depth         = false;
-	bool           volume_texture          = false;
-	TileSizeOffset level_sizes[16]         = {};
-	TilePaddedSize padded_sizes[16]        = {};
+	uint32_t        tile                = 0;
+	uint32_t        pitch               = 0;
+	uint64_t        slice_stride        = 0;
+	uint64_t        source_slice_stride = 0;
+	uint32_t        first_tail_level    = 16;
+	TileBlockFamily tile_family         = TileBlockFamily::Count;
+	bool            volume_texture      = false;
+	TileSizeOffset  level_sizes[16]     = {};
+	TilePaddedSize  padded_sizes[16]    = {};
 };
 
 struct TextureImageCreateParams {
@@ -88,8 +83,8 @@ struct TextureImageCreateParams {
 
 vk::ComponentSwizzle TextureGetComponentSwizzle(uint8_t s);
 vk::ComponentMapping TextureGetComponentMapping(uint32_t swizzle);
-bool                 TextureCheckFormat(GraphicContext* ctx, vk::ImageCreateInfo* image_info);
-bool TextureCheckStorageSwizzle(vk::ImageCreateInfo* image_info, vk::ComponentMapping* components);
+bool                 TextureCheckFormat(vk::ImageCreateInfo& image_info);
+bool TextureCheckStorageSwizzle(vk::ImageCreateInfo& image_info, vk::ComponentMapping& components);
 vk::ImageUsageFlags    TextureGetUsage(TextureFormatUsage usage);
 vk::ImageUsageFlags    TextureGetViewUsage(TextureFormatUsage usage);
 vk::Format             TextureGetFormat(uint32_t fmt);
@@ -104,36 +99,37 @@ bool     TextureIs3DTexture(uint64_t type);
 bool     TextureIsCubeTexture(uint64_t type);
 bool     TextureIsLayeredTexture(uint64_t type);
 bool     TextureCanCreateCubeView(uint64_t type, uint32_t base_array, uint32_t layer_count);
-vk::ComponentMapping TextureCreateImage(GraphicContext* ctx, VulkanImage* image,
+vk::ComponentMapping TextureCreateImage(VulkanImage& image,
                                         const TextureImageCreateParams& params);
-void TextureCreateImageViews(GraphicContext* ctx, VulkanImage* vk_obj,
+void TextureCreateImageViews(VulkanImage& vk_obj,
                              vk::ComponentMapping components, uint64_t type, uint32_t base_array,
                              uint32_t base_level, uint32_t level_count, uint32_t depth,
                              bool allow_cube_view, TextureFormatUsage view_usage);
 TextureUploadLayout TextureCalcUploadLayout(uint32_t fmt, uint64_t width, uint64_t height,
                                             uint64_t levels, uint32_t depth, uint64_t pitch,
                                             uint64_t tile, uint64_t upload_size,
-                                            bool allow_depth_tile,
-                                            bool require_single_mip_small_tiles,
-                                            bool volume_texture, const char* owner);
+                                            bool allow_depth_tile, bool volume_texture,
+                                            const char* owner);
 uint64_t TextureUploadSliceSourceOffset(const TextureUploadLayout& layout, uint32_t level,
-                                        uint32_t                 slice,
-                                        TextureUploadSliceLayout source_slice_layout);
+                                        uint32_t slice);
 uint64_t TextureCalcUploadSize(const TextureUploadLayout&          layout,
                                const std::vector<BufferImageCopy>& regions, uint64_t levels,
-                               uint32_t depth, TextureUploadSliceLayout source_slice_layout);
-std::vector<BufferImageCopy> TextureBuildUploadRegions(
-    const TextureUploadLayout& layout, vk::Format image_format, uint32_t width, uint32_t height,
-    uint32_t depth, uint64_t levels, bool array_texture, bool volume_texture,
-    TextureUploadDestination destination, TextureUploadSliceLayout slice_layout);
-void TextureCopyBufferBytes(GraphicContext* ctx, VulkanBuffer* src_buffer,
-                            uint64_t src_buffer_offset, uint64_t copy_size,
-                            Transfer::ScratchBuffer* dst);
-void TextureUploadGuestImage(GraphicContext* ctx, VulkanImage* vk_obj, const void* src_data,
+                               uint32_t depth);
+std::vector<BufferImageCopy> TextureBuildUploadRegions(const TextureUploadLayout& layout,
+                                                       vk::Format image_format, uint32_t width,
+                                                       uint32_t height, uint32_t depth,
+                                                       uint64_t levels, bool array_texture,
+                                                       bool                     volume_texture,
+                                                       TextureUploadDestination destination);
+std::vector<ImageBufferCopy>
+TextureBuildDownloadRegions(const std::vector<BufferImageCopy>& upload_regions);
+bool TextureBuildGpuTileInfos(uint64_t size, const std::vector<BufferImageCopy>& regions,
+                              const TextureUploadLayout& layout, uint32_t fmt, uint32_t depth,
+                              uint64_t levels, std::vector<GpuTileInfo>& infos);
+void TextureUploadGuestImage(VulkanImage& vk_obj, const void* src_data,
                              uint64_t size, const std::vector<BufferImageCopy>& regions,
                              const TextureUploadLayout& layout, uint32_t fmt, uint64_t width,
-                             uint64_t height, uint32_t depth, uint64_t levels,
-                             TextureUploadSliceLayout source_slice_layout, const char* owner,
+                             uint64_t height, uint32_t depth, uint64_t levels, const char* owner,
                              vk::ImageLayout dst_layout);
 
 } // namespace Libs::Graphics

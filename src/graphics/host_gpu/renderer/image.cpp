@@ -4,12 +4,14 @@
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/tile.h"
+#include "graphics/host_gpu/gpuTiler.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/objects/textureCommon.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 #include "graphics/host_gpu/renderer/framebufferCache.h"
 #include "graphics/host_gpu/renderer/imageView.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/transfer.h"
 #include "graphics/host_gpu/vma.h"
 #include "graphics/shader/shader.h"
@@ -48,15 +50,15 @@ TextureImageCreateParams MakeImageParams(const ImageInfo& info, bool storage) {
 	return params;
 }
 
-bool RenderTargetSupportsStorage(GraphicContext* ctx, vk::Format format,
+bool RenderTargetSupportsStorage(vk::Format format,
                                  vk::ImageCreateFlags flags) {
 	const auto compatible = SrgbStorageViewFormat(format);
 	const auto required_flags =
 	    vk::ImageCreateFlagBits::eMutableFormat | vk::ImageCreateFlagBits::eExtendedUsage;
 	const bool compatible_views = (flags & required_flags) == required_flags;
-	return ImageViewOps::FormatSupportsStorage(ctx, format) ||
+	return ImageViewOps::FormatSupportsStorage(format) ||
 	       (compatible_views && compatible != vk::Format::eUndefined &&
-	        ImageViewOps::FormatSupportsStorage(ctx, compatible));
+	        ImageViewOps::FormatSupportsStorage(compatible));
 }
 
 vk::ImageCreateFlags RenderTargetCreateFlags(vk::Format format) {
@@ -70,21 +72,26 @@ vk::ImageCreateFlags RenderTargetCreateFlags(vk::Format format) {
 	           : vk::ImageCreateFlags {0};
 }
 
-vk::ImageUsageFlags RenderTargetUsage(GraphicContext* ctx, vk::Format format,
-                                      vk::ImageCreateFlags flags) {
+vk::ImageUsageFlags RenderTargetUsage(vk::Format format,
+                                      vk::ImageCreateFlags flags, uint32_t samples) {
+	auto& graphics = GetRenderContext().GetGraphics();
 	auto usage = static_cast<vk::ImageUsageFlags>(vk::ImageUsageFlagBits::eColorAttachment) |
 	             static_cast<vk::ImageUsageFlags>(vk::ImageUsageFlagBits::eTransferSrc) |
-	             static_cast<vk::ImageUsageFlags>(vk::ImageUsageFlagBits::eTransferDst) |
-	             static_cast<vk::ImageUsageFlags>(vk::ImageUsageFlagBits::eSampled);
-	if (RenderTargetSupportsStorage(ctx, format, flags)) {
-		usage |= vk::ImageUsageFlagBits::eStorage;
+	             static_cast<vk::ImageUsageFlags>(vk::ImageUsageFlagBits::eTransferDst);
+	if (samples == 1) {
+		usage |= vk::ImageUsageFlagBits::eSampled;
+		if (RenderTargetSupportsStorage(format, flags)) {
+			usage |= vk::ImageUsageFlagBits::eStorage;
+		}
 	}
 	vk::ImageFormatProperties properties {};
-	if (ctx->GetImageFormatProperties(format, vk::ImageType::e2D, vk::ImageTiling::eOptimal, usage,
-	                                  flags, &properties) != vk::Result::eSuccess) {
+	if (graphics.GetImageFormatProperties(format, vk::ImageType::e2D, vk::ImageTiling::eOptimal,
+	                                      usage, flags, &properties) != vk::Result::eSuccess ||
+	    !static_cast<bool>(properties.sampleCounts & vulkan_sample_count(samples))) {
 		EXIT("TextureCache: render-target format does not support required usage, format=%d "
-		     "usage=0x%x\n",
-		     static_cast<int>(format), static_cast<vk::ImageUsageFlags::MaskType>(usage));
+		     "usage=0x%x samples=%u supported=0x%x\n",
+		     static_cast<int>(format), static_cast<vk::ImageUsageFlags::MaskType>(usage), samples,
+		     static_cast<vk::SampleCountFlags::MaskType>(properties.sampleCounts));
 	}
 	return usage;
 }
@@ -140,40 +147,42 @@ uint32_t RenderTargetTransferFormat(uint32_t bytes_per_element) {
 	return RenderTargetTransferFormatImpl(bytes_per_element);
 }
 
-GpuTextureVulkanImage* CreateTexture(GraphicContext* ctx, const ImageInfo& info, bool storage,
-                                     vk::ComponentMapping* components) {
-	if (components == nullptr) {
-		EXIT("TextureCache: invalid texture component output\n");
-	}
+GpuTextureVulkanImage* CreateTexture(const ImageInfo& info, bool storage,
+                                     vk::ComponentMapping& components) {
 	auto* image = storage ? static_cast<GpuTextureVulkanImage*>(new StorageTextureVulkanImage)
 	                      : new TextureVulkanImage;
-	*components = TextureCreateImage(ctx, image, MakeImageParams(info, storage));
+	components  = TextureCreateImage(*image, MakeImageParams(info, storage));
 	return image;
 }
 
-void CreateTextureViews(GraphicContext* ctx, GpuTextureVulkanImage* image, const ImageInfo& info,
-                        bool storage, vk::ComponentMapping components) {
+void CreateTextureViews(GpuTextureVulkanImage& image,
+                        const ImageInfo& info, bool storage, vk::ComponentMapping components) {
 	if (storage) {
-		TextureCreateImageViews(ctx, image, components, info.type, 0, 0, 1, info.depth, false,
+		TextureCreateImageViews(image, components, info.type, 0, 0, 1, info.depth, false,
 		                        TextureFormatUsage::Sampled | TextureFormatUsage::Storage);
 	} else {
-		TextureCreateImageViews(ctx, image, components, info.type, info.base_array, info.base_level,
-		                        info.view_levels, info.depth, true, TextureFormatUsage::Sampled);
+		TextureCreateImageViews(image, components, info.type, info.base_array,
+		                        info.base_level, info.view_levels, info.depth, true,
+		                        TextureFormatUsage::Sampled);
 	}
 }
 
-void UploadRenderTargetLayers(GraphicContext* ctx, RenderTextureVulkanImage* image,
+void UploadRenderTargetLayers(RenderTextureVulkanImage& image,
                               const RenderTargetInfo& info, uint32_t base_layer,
                               uint32_t layer_count, bool refresh) {
 	if (info.layers == 0 || info.size % info.layers != 0 || layer_count == 0 ||
-	    base_layer >= info.layers || layer_count > info.layers - base_layer || image == nullptr ||
-	    base_layer >= image->layers || layer_count > image->layers - base_layer) {
+	    base_layer >= info.layers || layer_count > info.layers - base_layer ||
+	    base_layer >= image.layers || layer_count > image.layers - base_layer) {
 		EXIT("TextureCache: invalid render-target layer upload, base=%u count=%u "
 		     "info_layers=%u image_layers=%u size=0x%016" PRIx64 "\n",
-		     base_layer, layer_count, info.layers, image != nullptr ? image->layers : 0, info.size);
+		     base_layer, layer_count, info.layers, image.layers, info.size);
+	}
+	if (info.samples != 1 || image.samples != 1) {
+		EXIT("TextureCache: multisampled render-target upload is unsupported, samples=%u/%u\n",
+		     info.samples, image.samples);
 	}
 	if (refresh) {
-		Transfer::WaitForGraphicsIdle(ctx);
+		Transfer::WaitForGraphicsIdle();
 	}
 	const auto slice_size  = info.size / info.layers;
 	const auto upload_size = slice_size * layer_count;
@@ -182,54 +191,60 @@ void UploadRenderTargetLayers(GraphicContext* ctx, RenderTextureVulkanImage* ima
 		const auto format = RenderTargetTransferFormat(info.bytes_per_element);
 		auto layout = TextureCalcUploadLayout(format, info.width, info.height, info.levels,
 		                                      layer_count, info.pitch, info.tile_mode, upload_size,
-		                                      false, false, false, "TextureCache render target");
+		                                      false, false, "TextureCache render target");
 		const bool render_target_tiled =
 		    info.tile_mode == Prospero::GpuEnumValue(Prospero::TileMode::kRenderTarget);
-		if (!standard64 && ((render_target_tiled && !layout.fmt_tiled_render_target) ||
-		                    layout.pitch != info.pitch)) {
+		if (!standard64 &&
+		    ((render_target_tiled && layout.tile_family != TileBlockFamily::RenderTarget64KB) ||
+		     layout.pitch != info.pitch)) {
 			EXIT("TextureCache: unsupported render-target mip upload layout, pitch=%u/%u tile=%u\n",
 			     info.pitch, layout.pitch, info.tile_mode);
 		}
-		auto regions = TextureBuildUploadRegions(
-		    layout, info.format, info.width, info.height, layer_count, info.levels, true, false,
-		    TextureUploadDestination::MipLevels, TextureUploadSliceLayout::MipChainPerSlice);
+		auto regions = TextureBuildUploadRegions(layout, info.format, info.width, info.height,
+		                                         layer_count, info.levels, true, false,
+		                                         TextureUploadDestination::MipLevels);
 		for (auto& region: regions) {
 			region.dst_layer += base_layer;
 		}
 		const auto source_address = info.address + slice_size * base_layer;
-		TextureUploadGuestImage(ctx, image, reinterpret_cast<const void*>(source_address),
+		TextureUploadGuestImage(image, reinterpret_cast<const void*>(source_address),
 		                        upload_size, regions, layout, format, info.width, info.height,
-		                        layer_count, info.levels,
-		                        TextureUploadSliceLayout::MipChainPerSlice,
-		                        "TextureCache render target", vk::ImageLayout::eGeneral);
+		                        layer_count, info.levels, "TextureCache render target",
+		                        vk::ImageLayout::eGeneral);
 		return;
 	}
 	if (info.tile_mode == Prospero::GpuEnumValue(Prospero::TileMode::kRenderTarget) &&
 	    Transfer::GuestBufferIsTiled(info.address, slice_size)) {
-		Transfer::ScratchBuffer scratch(slice_size);
-		TileConvertTiledToLinearRenderTarget(
-		    scratch.Data(), reinterpret_cast<const void*>(info.address), info.width, info.height,
-		    info.pitch, info.bytes_per_element, slice_size);
-		Transfer::UploadImage(ctx, image, scratch.Data(), slice_size, info.pitch,
-		                      vk::ImageLayout::eGeneral);
+		const auto format = RenderTargetTransferFormat(info.bytes_per_element);
+		auto layout  = TextureCalcUploadLayout(format, info.width, info.height, 1, 1, info.pitch,
+		                                       info.tile_mode, slice_size, false, false,
+		                                       "TextureCache render target");
+		auto regions = TextureBuildUploadRegions(layout, info.format, info.width, info.height, 1, 1,
+		                                         true, false, TextureUploadDestination::MipLevels);
+		TextureUploadGuestImage(image, reinterpret_cast<const void*>(info.address),
+		                        slice_size, regions, layout, format, info.width, info.height, 1, 1,
+		                        "TextureCache render target", vk::ImageLayout::eGeneral);
 	} else {
-		Transfer::UploadImage(ctx, image, reinterpret_cast<const void*>(info.address), slice_size,
-		                      info.pitch, vk::ImageLayout::eGeneral);
+		Transfer::UploadImage(image, reinterpret_cast<const void*>(info.address),
+		                      slice_size, info.pitch, vk::ImageLayout::eGeneral);
 	}
 }
 
-void UploadRenderTarget(GraphicContext* ctx, RenderTextureVulkanImage* image,
+void UploadRenderTarget(RenderTextureVulkanImage& image,
                         const RenderTargetInfo& info, bool refresh) {
-	UploadRenderTargetLayers(ctx, image, info, 0, info.layers, refresh);
+	UploadRenderTargetLayers(image, info, 0, info.layers, refresh);
 }
 
-RenderTextureVulkanImage* CreateRenderTarget(GraphicContext* ctx, const RenderTargetInfo& info) {
+RenderTextureVulkanImage* CreateRenderTarget(
+                                             const RenderTargetInfo& info) {
+	auto& graphics = GetRenderContext().GetGraphics();
 	auto* image          = new RenderTextureVulkanImage;
 	image->extent.width  = info.width;
 	image->extent.height = info.height;
 	image->format        = info.format;
 	image->mip_levels    = info.levels;
 	image->layers        = info.layers;
+	image->samples       = info.samples;
 	image->layout        = vk::ImageLayout::eUndefined;
 	vk::ImageCreateInfo create {};
 	create.sType           = vk::StructureType::eImageCreateInfo;
@@ -241,20 +256,21 @@ RenderTextureVulkanImage* CreateRenderTarget(GraphicContext* ctx, const RenderTa
 	create.format          = info.format;
 	create.tiling          = vk::ImageTiling::eOptimal;
 	create.initialLayout   = vk::ImageLayout::eUndefined;
-	create.usage           = RenderTargetUsage(ctx, info.format, create.flags);
+	create.usage           = RenderTargetUsage(info.format, create.flags, info.samples);
 	create.sharingMode     = vk::SharingMode::eExclusive;
-	create.samples         = vk::SampleCountFlagBits::e1;
+	create.samples         = vulkan_sample_count(info.samples);
 	image->memory.property = vk::MemoryPropertyFlagBits::eDeviceLocal;
-	if (!VulkanCreateImage(ctx, create, image)) {
+	if (!graphics.CreateImage(create, *image)) {
 		EXIT("TextureCache: failed to create render target, addr=0x%016" PRIx64
 		     " extent=%ux%u format=%d\n",
 		     info.address, info.width, info.height, static_cast<int>(info.format));
 	}
-	ImageViewOps::CreateRenderTargetViews(ctx, image);
+	ImageViewOps::CreateRenderTargetViews(*image);
 	return image;
 }
 
-DepthStencilVulkanImage* CreateDepthTarget(GraphicContext* ctx, const DepthTargetInfo& info) {
+DepthStencilVulkanImage* CreateDepthTarget(const DepthTargetInfo& info) {
+	auto& graphics = GetRenderContext().GetGraphics();
 	vk::ImageCreateInfo create {};
 	create.sType         = vk::StructureType::eImageCreateInfo;
 	create.imageType     = vk::ImageType::e2D;
@@ -266,34 +282,38 @@ DepthStencilVulkanImage* CreateDepthTarget(GraphicContext* ctx, const DepthTarge
 	create.initialLayout = vk::ImageLayout::eUndefined;
 	create.usage         = DepthTargetImageUsage();
 	create.sharingMode   = vk::SharingMode::eExclusive;
-	create.samples       = vk::SampleCountFlagBits::e1;
+	create.samples       = vulkan_sample_count(info.samples);
 	vk::ImageFormatProperties properties {};
-	if (ctx->GetImageFormatProperties(info.format, vk::ImageType::e2D, vk::ImageTiling::eOptimal,
-	                                  create.usage, vk::ImageCreateFlags {},
-	                                  &properties) != vk::Result::eSuccess) {
-		EXIT("TextureCache: depth format does not support required usage, format=%d usage=0x%x\n",
+	if (graphics.GetImageFormatProperties(
+	        info.format, vk::ImageType::e2D, vk::ImageTiling::eOptimal, create.usage,
+	        vk::ImageCreateFlags {}, &properties) != vk::Result::eSuccess ||
+	    !static_cast<bool>(properties.sampleCounts & create.samples)) {
+		EXIT("TextureCache: depth format does not support required usage, format=%d usage=0x%x "
+		     "samples=%u supported=0x%x\n",
 		     static_cast<int>(info.format),
-		     static_cast<vk::ImageUsageFlags::MaskType>(create.usage));
+		     static_cast<vk::ImageUsageFlags::MaskType>(create.usage), info.samples,
+		     static_cast<vk::SampleCountFlags::MaskType>(properties.sampleCounts));
 	}
 	auto* image            = new DepthStencilVulkanImage;
 	image->extent.width    = info.width;
 	image->extent.height   = info.height;
 	image->guest_pitch     = info.pitch;
 	image->layers          = info.layers;
+	image->samples         = info.samples;
 	image->format          = info.format;
 	image->layout          = vk::ImageLayout::eUndefined;
 	image->compressed      = false;
 	image->memory.property = vk::MemoryPropertyFlagBits::eDeviceLocal;
-	if (!VulkanCreateImage(ctx, create, image)) {
+	if (!graphics.CreateImage(create, *image)) {
 		EXIT("TextureCache: failed to create depth target, addr=0x%016" PRIx64
 		     " extent=%ux%u format=%d\n",
 		     info.address, info.width, info.height, static_cast<int>(info.format));
 	}
-	ImageViewOps::CreateDepthViews(ctx, image);
+	ImageViewOps::CreateDepthViews(*image);
 	return image;
 }
 
-void ValidateVideoOut(GraphicContext* ctx, const VideoOutInfo& info) {
+void ValidateVideoOut(const VideoOutInfo& info) {
 	const auto compression =
 	    ClassifyVideoOutCompression(info.compression != VideoOutCompression::Uncompressed,
 	                                info.metadata_address, info.dcc_control, 0);
@@ -302,23 +322,23 @@ void ValidateVideoOut(GraphicContext* ctx, const VideoOutInfo& info) {
 	                              (info.metadata_address >= TRACKER_ADDRESS_SIZE ||
 	                               (info.metadata_address >= info.address &&
 	                                info.metadata_address < info.address + info.size));
-	if (ctx == nullptr || info.address == 0 || info.size == 0 ||
-	    info.address >= TRACKER_ADDRESS_SIZE || info.size > TRACKER_ADDRESS_SIZE - info.address ||
-	    (info.address & 0xffffu) != 0 || info.width == 0 || info.height == 0 ||
-	    info.width > 16384 || info.height > 16384 || info.pitch < info.width ||
+	if (info.address == 0 || info.size == 0 || info.address >= TRACKER_ADDRESS_SIZE ||
+	    info.size > TRACKER_ADDRESS_SIZE - info.address || (info.address & 0xffffu) != 0 ||
+	    info.width == 0 || info.height == 0 || info.width > 16384 || info.height > 16384 ||
+	    info.pitch < info.width ||
 	    info.tile_mode != Prospero::GpuEnumValue(Prospero::TileMode::kRenderTarget) ||
 	    compression == VideoOutCompression::Unsupported || compression != info.compression ||
 	    metadata_invalid || !IsSupportedVideoOutFormat(info)) {
-		EXIT("TextureCache: unsupported video-out surface, ctx=%p addr=0x%016" PRIx64
-		     " size=0x%016" PRIx64 " metadata=0x%016" PRIx64 " dcc=0x%08" PRIx32
+		EXIT("TextureCache: unsupported video-out surface, addr=0x%016" PRIx64 " size=0x%016" PRIx64
+		     " metadata=0x%016" PRIx64 " dcc=0x%08" PRIx32
 		     " extent=%ux%u pitch=%u tile=%u guest_format=%u bpe=%u vk_format=%d\n",
-		     static_cast<const void*>(ctx), info.address, info.size, info.metadata_address,
-		     info.dcc_control, info.width, info.height, info.pitch, info.tile_mode,
-		     info.guest_format, info.bytes_per_element, static_cast<int>(info.format));
+		     info.address, info.size, info.metadata_address, info.dcc_control, info.width,
+		     info.height, info.pitch, info.tile_mode, info.guest_format, info.bytes_per_element,
+		     static_cast<int>(info.format));
 	}
 	TileSizeAlign exact {};
 	TileGetTextureTotalSize(info.guest_format, info.width, info.height, 1, info.pitch, 1,
-	                        info.tile_mode, false, &exact);
+	                        info.tile_mode, false, exact);
 	if (exact.align != 65536 || exact.size != info.size ||
 	    TileGetTexturePitch(info.guest_format, info.width, 1, info.tile_mode) != info.pitch) {
 		EXIT("TextureCache: video-out tile layout mismatch, addr=0x%016" PRIx64
@@ -326,10 +346,11 @@ void ValidateVideoOut(GraphicContext* ctx, const VideoOutInfo& info) {
 		     " pitch=%u\n",
 		     info.address, info.size, exact.size, exact.align, info.pitch);
 	}
-	(void)RenderTargetUsage(ctx, info.format, vk::ImageCreateFlags {});
+	(void)RenderTargetUsage(info.format, vk::ImageCreateFlags {}, 1);
 }
 
-VideoOutVulkanImage* CreateVideoOut(GraphicContext* ctx, const VideoOutInfo& info) {
+VideoOutVulkanImage* CreateVideoOut(const VideoOutInfo& info) {
+	auto& graphics = GetRenderContext().GetGraphics();
 	auto* image          = new VideoOutVulkanImage;
 	image->extent.width  = info.width;
 	image->extent.height = info.height;
@@ -345,20 +366,20 @@ VideoOutVulkanImage* CreateVideoOut(GraphicContext* ctx, const VideoOutInfo& inf
 	create.tiling          = vk::ImageTiling::eOptimal;
 	create.initialLayout   = vk::ImageLayout::eUndefined;
 	create.flags           = RenderTargetCreateFlags(info.format);
-	create.usage           = RenderTargetUsage(ctx, info.format, create.flags);
+	create.usage           = RenderTargetUsage(info.format, create.flags, 1);
 	create.sharingMode     = vk::SharingMode::eExclusive;
 	create.samples         = vk::SampleCountFlagBits::e1;
 	image->memory.property = vk::MemoryPropertyFlagBits::eDeviceLocal;
-	if (!VulkanCreateImage(ctx, create, image)) {
+	if (!graphics.CreateImage(create, *image)) {
 		EXIT("TextureCache: failed to create video-out image, addr=0x%016" PRIx64
 		     " extent=%ux%u format=%d\n",
 		     info.address, info.width, info.height, static_cast<int>(info.format));
 	}
-	ImageViewOps::CreateVideoOutViews(ctx, image);
+	ImageViewOps::CreateVideoOutViews(*image);
 	return image;
 }
 
-void UploadVideoOut(GraphicContext* ctx, VideoOutVulkanImage* image, const VideoOutInfo& info,
+void UploadVideoOut(VideoOutVulkanImage& image, const VideoOutInfo& info,
                     bool refresh) {
 	if (info.compression != VideoOutCompression::Uncompressed) {
 		EXIT("TextureCache: compressed video-out guest upload is unsupported, "
@@ -366,24 +387,50 @@ void UploadVideoOut(GraphicContext* ctx, VideoOutVulkanImage* image, const Video
 		     info.address, info.metadata_address, info.dcc_control);
 	}
 	if (refresh) {
-		Transfer::WaitForGraphicsIdle(ctx);
+		Transfer::WaitForGraphicsIdle();
 	}
-	image->layout = vk::ImageLayout::eUndefined;
+	image.layout = vk::ImageLayout::eUndefined;
+	if (!info.bgra16) {
+		auto layout =
+		    TextureCalcUploadLayout(info.guest_format, info.width, info.height, 1, 1, info.pitch,
+		                            info.tile_mode, info.size, false, false, "VideoOut");
+		auto regions = TextureBuildUploadRegions(layout, info.format, info.width, info.height, 1, 1,
+		                                         false, false, TextureUploadDestination::MipLevels);
+		TextureUploadGuestImage(image, reinterpret_cast<const void*>(info.address),
+		                        info.size, regions, layout, info.guest_format, info.width,
+		                        info.height, 1, 1, "VideoOut", vk::ImageLayout::eGeneral);
+		return;
+	}
 	Transfer::ScratchBuffer scratch(info.size);
-	TileConvertTiledToLinearRenderTarget(
-	    scratch.Data(), reinterpret_cast<const void*>(info.address), info.width, info.height,
-	    info.pitch, info.bytes_per_element, info.size);
-	if (info.bgra16) {
-		auto* pixels = static_cast<uint16_t*>(scratch.Data());
-		for (uint64_t i = 0; i < info.size / sizeof(uint16_t); i += 4) {
-			std::swap(pixels[i], pixels[i + 2]);
-		}
-	}
-	Transfer::UploadImage(ctx, image, scratch.Data(), info.size, info.pitch,
+	TileBlockLayout         block {};
+	EXIT_NOT_IMPLEMENTED(
+	    !TileGetBlockLayout(TileBlockFamily::RenderTarget64KB, info.bytes_per_element, block));
+	const GpuTileInfo tile_info {block.family,
+	                             block.bytes_per_element,
+	                             0,
+	                             info.size,
+	                             0,
+	                             info.size,
+	                             0,
+	                             info.width,
+	                             info.height,
+	                             1,
+	                             info.pitch};
+	GpuDetile(reinterpret_cast<const void*>(info.address), scratch.Data(), info.size,
+	          info.size, std::span<const GpuTileInfo>(&tile_info, 1));
+	SwapVideoOutBgra16(scratch.Data(), info.size);
+	Transfer::UploadImage(image, scratch.Data(), info.size, info.pitch,
 	                      vk::ImageLayout::eGeneral);
 }
 
-GpuTextureVulkanImage* CreateDummyTexture(GraphicContext* ctx, bool uint_format, bool image_3d,
+void SwapVideoOutBgra16(void* data, uint64_t size) {
+	auto* pixels = static_cast<uint16_t*>(data);
+	for (uint64_t i = 0; i < size / sizeof(uint16_t); i += 4) {
+		std::swap(pixels[i], pixels[i + 2]);
+	}
+}
+
+GpuTextureVulkanImage* CreateDummyTexture(bool uint_format, bool image_3d,
                                           bool storage) {
 	auto* image  = storage ? static_cast<GpuTextureVulkanImage*>(new StorageTextureVulkanImage)
 	                       : new TextureVulkanImage;
@@ -392,48 +439,47 @@ GpuTextureVulkanImage* CreateDummyTexture(GraphicContext* ctx, bool uint_format,
 	auto  owner  = storage ? "DummyStorageTexture" : "DummySampledTexture";
 
 	auto params     = MakeDummyTextureParams(uint_format, image_3d, usage, owner);
-	auto components = TextureCreateImage(ctx, image, params);
+	auto components = TextureCreateImage(*image, params);
 
 	static constexpr uint32_t zero = 0;
-	Transfer::UploadImage(ctx, image, &zero, sizeof(zero), 1, layout);
-	TextureCreateImageViews(ctx, image, components, params.type, 0, params.base_level,
+	Transfer::UploadImage(*image, &zero, sizeof(zero), 1, layout);
+	TextureCreateImageViews(*image, components, params.type, 0, params.base_level,
 	                        params.levels, params.depth, params.allow_cube_view, params.view_usage);
 	return image;
 }
 
-void Destroy(GraphicContext* ctx, VulkanImage* image) {
+void Destroy(VulkanImage& image) {
+	auto& graphics = GetRenderContext().GetGraphics();
 	KYTY_PROFILER_BLOCK("TextureCache::DeleteImage");
-	EXIT_IF(ctx == nullptr || image == nullptr || g_render_ctx == nullptr);
-
-	switch (image->type) {
+	switch (image.type) {
 		case VulkanImageType::RenderTexture:
 		case VulkanImageType::VideoOut:
-			g_render_ctx->GetFramebufferCache()->FreeFramebufferByColor(image);
+			GetRenderContext().GetFramebufferCache().FreeFramebufferByColor(image);
 			break;
 		case VulkanImageType::DepthStencil:
-			g_render_ctx->GetFramebufferCache()->FreeFramebufferByDepth(
-			    static_cast<DepthStencilVulkanImage*>(image));
+			GetRenderContext().GetFramebufferCache().FreeFramebufferByDepth(
+			    static_cast<DepthStencilVulkanImage&>(image));
 			break;
 		case VulkanImageType::Texture:
 		case VulkanImageType::StorageTexture: break;
 		case VulkanImageType::Unknown: EXIT("cannot destroy an untyped Vulkan image\n");
 	}
 
-	ImageViewOps::DestroyViews(ctx, image);
-	VulkanDeleteImage(ctx, image);
+	ImageViewOps::DestroyViews(image);
+	graphics.DeleteImage(image);
 
-	switch (image->type) {
-		case VulkanImageType::Texture: delete static_cast<TextureVulkanImage*>(image); break;
+	switch (image.type) {
+		case VulkanImageType::Texture: delete &static_cast<TextureVulkanImage&>(image); break;
 		case VulkanImageType::StorageTexture:
-			delete static_cast<StorageTextureVulkanImage*>(image);
+			delete &static_cast<StorageTextureVulkanImage&>(image);
 			break;
 		case VulkanImageType::RenderTexture:
-			delete static_cast<RenderTextureVulkanImage*>(image);
+			delete &static_cast<RenderTextureVulkanImage&>(image);
 			break;
 		case VulkanImageType::DepthStencil:
-			delete static_cast<DepthStencilVulkanImage*>(image);
+			delete &static_cast<DepthStencilVulkanImage&>(image);
 			break;
-		case VulkanImageType::VideoOut: delete static_cast<VideoOutVulkanImage*>(image); break;
+		case VulkanImageType::VideoOut: delete &static_cast<VideoOutVulkanImage&>(image); break;
 		case VulkanImageType::Unknown: EXIT("cannot delete an untyped Vulkan image\n");
 	}
 }
