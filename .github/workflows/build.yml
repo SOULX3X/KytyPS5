@@ -3,7 +3,7 @@ name: Build KytyPS5
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
 
 jobs:
@@ -11,12 +11,12 @@ jobs:
     runs-on: windows-2022
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Setup Visual Studio environment
+      - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Setup Ninja
@@ -31,7 +31,22 @@ jobs:
           arch: win64_msvc2022_64
           cache: true
 
-      - name: Verify toolchain
+      - name: Install Vulkan SDK 1.4.335.0
+        shell: powershell
+        run: |
+          Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/1.4.335.0/windows/VulkanSDK-1.4.335.0-Installer.exe" -OutFile VulkanSDK.exe
+          Start-Process .\VulkanSDK.exe -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait
+
+          echo "VULKAN_SDK=C:\VulkanSDK\1.4.335.0" >> $env:GITHUB_ENV
+          echo "C:\VulkanSDK\1.4.335.0\Bin" >> $env:GITHUB_PATH
+
+      - name: Refresh Environment
+        shell: powershell
+        run: |
+          $env:PATH = "C:\VulkanSDK\1.4.335.0\Bin;$env:PATH"
+          echo "PATH=$env:PATH" >> $env:GITHUB_ENV
+
+      - name: Verify Tools
         shell: cmd
         run: |
           git --version
@@ -39,6 +54,9 @@ jobs:
           ninja --version
           clang-cl --version
           echo Qt6_DIR=%Qt6_DIR%
+          echo VULKAN_SDK=%VULKAN_SDK%
+          where glslangValidator
+          glslangValidator --version
 
       - name: Configure
         shell: cmd
@@ -53,14 +71,14 @@ jobs:
       - name: Build
         shell: cmd
         run: |
-          cmake --build _Build/windows --target launcher --parallel
+          cmake --build _Build/windows --parallel --target launcher
 
       - name: Install
         shell: cmd
         run: |
           cmake --install _Build/windows --prefix _Build/windows/install
 
-      - name: Upload Artifacts
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: KytyPS5
@@ -75,32 +93,24 @@ jobs:
       contents: write
 
     steps:
-      - name: Download build
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: KytyPS5
           path: KytyPS5
 
-      - name: Set release name
-        shell: bash
-        run: |
-          echo "RELEASE_NAME=KytyPS5-$(date -u +'%Y-%m-%d')-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - name: Zip
+        run: zip -r KytyPS5.zip KytyPS5
 
-      - name: Package build
-        shell: bash
-        run: zip -r "$RELEASE_NAME.zip" KytyPS5
-
-      - name: Create release
-        shell: bash
+      - name: Create Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$RELEASE_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release upload "$RELEASE_NAME" "$RELEASE_NAME.zip" --clobber --repo "$GITHUB_REPOSITORY"
+          TAG=nightly-${GITHUB_SHA::7}
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" KytyPS5.zip --clobber
           else
-            gh release create "$RELEASE_NAME" "$RELEASE_NAME.zip" \
-              --generate-notes \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "$RELEASE_NAME"
+            gh release create "$TAG" KytyPS5.zip \
+              --title "$TAG" \
+              --generate-notes
           fi
