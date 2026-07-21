@@ -136,7 +136,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG=nightly-${GITHUB_SHA::7}
+          TAG=KytyPS5-$(date -u +'%Y-%m-%d')-${GITHUB_SHA::7}
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" KytyPS5.zip \
