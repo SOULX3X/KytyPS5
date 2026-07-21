@@ -119,6 +119,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
@@ -135,10 +138,14 @@ jobs:
         run: |
           TAG=nightly-${GITHUB_SHA::7}
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" KytyPS5.zip --clobber
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" KytyPS5.zip \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$TAG" KytyPS5.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
               --title "$TAG" \
               --generate-notes
           fi
